@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	mathRand "math/rand"
+	"sync"
 
 	"github.com/google/uuid"
 	"go.mau.fi/util/random"
@@ -24,14 +25,16 @@ import (
 
 // Container is a wrapper for a SQL database that can contain multiple whatsmeow sessions.
 type Container struct {
-	db      *sql.DB
-	dialect string
-	log     waLog.Logger
-
+	db                   *sql.DB
+	dialect              string
+	log                  waLog.Logger
+	mutex                sync.Mutex
 	DatabaseErrorHandler func(device *store.Device, action string, attemptIndex int, err error) (retry bool)
 }
 
 var _ store.DeviceContainer = (*Container)(nil)
+
+var containerDbInstance *sql.DB
 
 // New connects to the given SQL database and wraps it in a Container.
 //
@@ -42,13 +45,18 @@ var _ store.DeviceContainer = (*Container)(nil)
 // When using SQLite, it's strongly recommended to enable foreign keys by adding `?_foreign_keys=true`:
 //
 //	container, err := sqlstore.New("sqlite3", "file:yoursqlitefile.db?_foreign_keys=on", nil)
-func New(dialect, address string, log waLog.Logger) (*Container, error) {
-	db, err := sql.Open(dialect, address)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open database: %w", err)
+func New(dialect, address string, log waLog.Logger, maxConnection int) (*Container, error) {
+	if containerDbInstance == nil {
+		db, err := sql.Open(dialect, address)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open database: %w", err)
+		}
+		db.SetMaxOpenConns(maxConnection)
+		db.SetMaxIdleConns(maxConnection)
+		containerDbInstance = db
 	}
-	container := NewWithDB(db, dialect, log)
-	err = container.Upgrade()
+	container := NewWithDB(containerDbInstance, dialect, log)
+	err := container.Upgrade()
 	if err != nil {
 		return nil, fmt.Errorf("failed to upgrade database: %w", err)
 	}
@@ -88,14 +96,48 @@ const getAllDevicesQuery = `
 SELECT jid, registration_id, noise_key, identity_key,
        signed_pre_key, signed_pre_key_id, signed_pre_key_sig,
        adv_key, adv_details, adv_account_sig, adv_account_sig_key, adv_device_sig,
-       platform, business_name, push_name, facebook_uuid
+       platform, business_name, push_name, facebook_uuid, manager_id
 FROM whatsmeow_device
 `
 
-const getDeviceQuery = getAllDevicesQuery + " WHERE jid=$1"
+const getDeviceByManagerId = `SELECT jid, registration_id, noise_key, identity_key,
+signed_pre_key, signed_pre_key_id, signed_pre_key_sig,
+adv_key, adv_details, adv_account_sig, adv_account_sig_key, adv_device_sig,
+platform, business_name, push_name, facebook_uuid, manager_id
+FROM whatsmeow_device
+WHERE manager_id = @p1`
+
+const getActiveManagerIds = `SELECT manager_id FROM whatsmeow_device GROUP BY manager_id`
+
+const getDeviceQuery = getAllDevicesQuery + " WHERE jid=@p1"
 
 type scannable interface {
 	Scan(dest ...interface{}) error
+}
+
+func (c *Container) GetActiveManagers() ([]string, error) {
+	// conn, err := c.db.Conn(ctx)
+	// if err != nil {
+	// 	return nil, err
+	// }
+	// defer conn.Close()
+	// rows, err := conn.QueryContext(ctx, getActiveManagerIds)
+	rows, err := c.db.Query(getActiveManagerIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []string
+
+	for rows.Next() {
+		var value string
+		err := rows.Scan(&value)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, value)
+	}
+	return result, err
 }
 
 func (c *Container) scanDevice(row scannable) (*store.Device, error) {
@@ -111,7 +153,7 @@ func (c *Container) scanDevice(row scannable) (*store.Device, error) {
 		&device.ID, &device.RegistrationID, &noisePriv, &identityPriv,
 		&preKeyPriv, &device.SignedPreKey.KeyID, &preKeySig,
 		&device.AdvSecretKey, &account.Details, &account.AccountSignature, &account.AccountSignatureKey, &account.DeviceSignature,
-		&device.Platform, &device.BusinessName, &device.PushName, &fbUUID)
+		&device.Platform, &device.BusinessName, &device.PushName, &fbUUID, &device.ManagerId)
 	if err != nil {
 		return nil, fmt.Errorf("failed to scan session: %w", err)
 	} else if len(noisePriv) != 32 || len(identityPriv) != 32 || len(preKeyPriv) != 32 || len(preKeySig) != 64 {
@@ -144,13 +186,14 @@ func (c *Container) scanDevice(row scannable) (*store.Device, error) {
 
 // GetAllDevices finds all the devices in the database.
 func (c *Container) GetAllDevices() ([]*store.Device, error) {
-	res, err := c.db.Query(getAllDevicesQuery)
+	rows, err := c.db.Query(getAllDevicesQuery)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query sessions: %w", err)
 	}
+	defer rows.Close()
 	sessions := make([]*store.Device, 0)
-	for res.Next() {
-		sess, scanErr := c.scanDevice(res)
+	for rows.Next() {
+		sess, scanErr := c.scanDevice(rows)
 		if scanErr != nil {
 			return sessions, scanErr
 		}
@@ -162,16 +205,33 @@ func (c *Container) GetAllDevices() ([]*store.Device, error) {
 // GetFirstDevice is a convenience method for getting the first device in the store. If there are
 // no devices, then a new device will be created. You should only use this if you don't want to
 // have multiple sessions simultaneously.
-func (c *Container) GetFirstDevice() (*store.Device, error) {
+func (c *Container) GetFirstDevice(managerId string) (*store.Device, error) {
 	devices, err := c.GetAllDevices()
 	if err != nil {
 		return nil, err
 	}
 	if len(devices) == 0 {
-		return c.NewDevice(), nil
+		return c.NewDevice(managerId), nil
 	} else {
 		return devices[0], nil
 	}
+}
+
+func (c *Container) GetAllManagerDevice(managerId string) ([]*store.Device, error) {
+	rows, err := c.db.Query(getDeviceByManagerId, managerId)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var devices []*store.Device
+	for rows.Next() {
+		device, err := c.scanDevice(rows)
+		if err != nil {
+			return nil, err
+		}
+		devices = append(devices, device)
+	}
+	return devices, nil
 }
 
 // GetDevice finds the device with the specified JID in the database.
@@ -188,33 +248,45 @@ func (c *Container) GetDevice(jid types.JID) (*store.Device, error) {
 }
 
 const (
-	insertDeviceQuery = `
+	sqliteInsertDeviceQuery = `
 		INSERT INTO whatsmeow_device (jid, registration_id, noise_key, identity_key,
 									  signed_pre_key, signed_pre_key_id, signed_pre_key_sig,
 									  adv_key, adv_details, adv_account_sig, adv_account_sig_key, adv_device_sig,
-									  platform, business_name, push_name, facebook_uuid)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+									  platform, business_name, push_name, facebook_uuid, manager_id)
+		VALUES (@p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8, @p9, @p10, @p11, @p12, @p13, @p14, @p15, @p16, @p17)
 		ON CONFLICT (jid) DO UPDATE
 		    SET platform=excluded.platform, business_name=excluded.business_name, push_name=excluded.push_name
 	`
-	deleteDeviceQuery = `DELETE FROM whatsmeow_device WHERE jid=$1`
+	mssqlInsertDeviceQuery = `
+		MERGE INTO whatsmeow_device AS target
+		USING (VALUES (@p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8, @p9, @p10, @p11, @p12, @p13, @p14, @p15, @p16, @p17)) AS source (jid, registration_id, noise_key, identity_key, signed_pre_key, signed_pre_key_id, signed_pre_key_sig, adv_key, adv_details, adv_account_sig, adv_account_sig_key, adv_device_sig, platform, business_name, push_name, facebook_uuid, manager_id)
+		ON (target.jid = source.jid)
+		WHEN MATCHED THEN
+			UPDATE SET target.platform = source.platform, target.business_name = source.business_name, target.push_name = source.push_name
+		WHEN NOT MATCHED THEN
+			INSERT (jid, registration_id, noise_key, identity_key, signed_pre_key, signed_pre_key_id, signed_pre_key_sig, adv_key, adv_details, adv_account_sig, adv_account_sig_key, adv_device_sig, platform, business_name, push_name, facebook_uuid, manager_id)
+			VALUES (source.jid, source.registration_id, CONVERT(varbinary(max),source.noise_key), source.identity_key, source.signed_pre_key, source.signed_pre_key_id, source.signed_pre_key_sig, source.adv_key, source.adv_details, source.adv_account_sig, source.adv_account_sig_key, source.adv_device_sig, source.platform, source.business_name, source.push_name, source.facebook_uuid, source.manager_id);
+	`
+	deleteDeviceQuery = `DELETE FROM whatsmeow_device WHERE jid=@p1`
 )
 
 // NewDevice creates a new device in this database.
 //
 // No data is actually stored before Save is called. However, the pairing process will automatically
 // call Save after a successful pairing, so you most likely don't need to call it yourself.
-func (c *Container) NewDevice() *store.Device {
+func (c *Container) NewDevice(managerId string) *store.Device {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
 	device := &store.Device{
 		Log:       c.log,
 		Container: c,
 
 		DatabaseErrorHandler: c.DatabaseErrorHandler,
-
-		NoiseKey:       keys.NewKeyPair(),
-		IdentityKey:    keys.NewKeyPair(),
-		RegistrationID: mathRand.Uint32(),
-		AdvSecretKey:   random.Bytes(32),
+		ManagerId:            managerId,
+		NoiseKey:             keys.NewKeyPair(),
+		IdentityKey:          keys.NewKeyPair(),
+		RegistrationID:       mathRand.Uint32(),
+		AdvSecretKey:         random.Bytes(32),
 	}
 	device.SignedPreKey = device.IdentityKey.CreateSignedPreKey(1)
 	return device
@@ -234,15 +306,25 @@ func (c *Container) Close() error {
 // PutDevice stores the given device in this database. This should be called through Device.Save()
 // (which usually doesn't need to be called manually, as the library does that automatically when relevant).
 func (c *Container) PutDevice(device *store.Device) error {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
 	if device.ID == nil {
 		return ErrDeviceIDMustBeSet
 	}
-	_, err := c.db.Exec(insertDeviceQuery,
-		device.ID.String(), device.RegistrationID, device.NoiseKey.Priv[:], device.IdentityKey.Priv[:],
-		device.SignedPreKey.Priv[:], device.SignedPreKey.KeyID, device.SignedPreKey.Signature[:],
-		device.AdvSecretKey, device.Account.Details, device.Account.AccountSignature, device.Account.AccountSignatureKey, device.Account.DeviceSignature,
-		device.Platform, device.BusinessName, device.PushName, uuid.NullUUID{UUID: device.FacebookUUID, Valid: device.FacebookUUID != uuid.Nil})
-
+	var err error
+	if c.dialect == "sqlserver" {
+		_, err = c.db.Exec(mssqlInsertDeviceQuery,
+			device.ID.String(), device.RegistrationID, device.NoiseKey.Priv[:], device.IdentityKey.Priv[:],
+			device.SignedPreKey.Priv[:], device.SignedPreKey.KeyID, device.SignedPreKey.Signature[:],
+			device.AdvSecretKey, device.Account.Details, device.Account.AccountSignature, device.Account.AccountSignatureKey, device.Account.DeviceSignature,
+			device.Platform, device.BusinessName, device.PushName, device.FacebookUUID.String(), device.ManagerId)
+	} else {
+		_, err = c.db.Exec(sqliteInsertDeviceQuery,
+			device.ID.String(), device.RegistrationID, device.NoiseKey.Priv[:], device.IdentityKey.Priv[:],
+			device.SignedPreKey.Priv[:], device.SignedPreKey.KeyID, device.SignedPreKey.Signature[:],
+			device.AdvSecretKey, device.Account.Details, device.Account.AccountSignature, device.Account.AccountSignatureKey, device.Account.DeviceSignature,
+			device.Platform, device.BusinessName, device.PushName, uuid.NullUUID{UUID: device.FacebookUUID, Valid: device.FacebookUUID != uuid.Nil}, device.ManagerId)
+	}
 	if !device.Initialized {
 		innerStore := NewSQLStore(c, *device.ID)
 		device.Identities = innerStore
@@ -262,6 +344,8 @@ func (c *Container) PutDevice(device *store.Device) error {
 
 // DeleteDevice deletes the given device from this database. This should be called through Device.Delete()
 func (c *Container) DeleteDevice(store *store.Device) error {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
 	if store.ID == nil {
 		return ErrDeviceIDMustBeSet
 	}

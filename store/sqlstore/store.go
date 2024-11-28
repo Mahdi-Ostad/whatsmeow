@@ -19,6 +19,7 @@ import (
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/util/keys"
+	waLog "go.mau.fi/whatsmeow/util/log"
 )
 
 // ErrInvalidLength is returned by some database getters if the database returned a byte array with an unexpected length.
@@ -45,16 +46,130 @@ type SQLStore struct {
 	contactCacheLock sync.Mutex
 }
 
+type contactUpdate struct {
+	sqlStore *SQLStore
+	contacts []store.ContactEntry
+}
+
+type senderkeyUpdate struct {
+	sqlStore *SQLStore
+	group    string
+	user     string
+	session  []byte
+	err      chan<- error
+}
+
+type sessionUpdate struct {
+	sqlStore *SQLStore
+	address  string
+	session  []byte
+	err      chan<- error
+}
+
+var sqlInstance *sql.DB
+var contactsChannel = make(chan contactUpdate)
+var senderkeysChannel = make(chan senderkeyUpdate)
+var sessionsChannel = make(chan sessionUpdate)
+
 // NewSQLStore creates a new SQLStore with the given database container and user JID.
 // It contains implementations of all the different stores in the store package.
 //
 // In general, you should use Container.NewDevice or Container.GetDevice instead of this.
 func NewSQLStore(c *Container, jid types.JID) *SQLStore {
+	if sqlInstance == nil {
+		sqlInstance = c.db
+	}
 	return &SQLStore{
 		Container:    c,
 		JID:          jid.String(),
 		contactCache: make(map[types.JID]*types.ContactInfo),
 	}
+}
+
+func ManageContacts(logger waLog.Logger) {
+	for contactUpdate := range contactsChannel {
+		if len(contactUpdate.contacts) > contactBatchSize {
+			tx, err := sqlInstance.Begin()
+			if err != nil {
+				logger.Errorf("failed to start transaction: " + err.Error())
+				continue
+			}
+			for i := 0; i < len(contactUpdate.contacts); i += contactBatchSize {
+				var contactSlice []store.ContactEntry
+				if len(contactUpdate.contacts) > i+contactBatchSize {
+					contactSlice = contactUpdate.contacts[i : i+contactBatchSize]
+				} else {
+					contactSlice = contactUpdate.contacts[i:]
+				}
+				err = contactUpdate.sqlStore.putContactNamesBatch(tx, contactSlice)
+				if err != nil {
+					break
+				}
+			}
+			if err != nil {
+				logger.Errorf(err.Error())
+				tx.Rollback()
+				continue
+			}
+			err = tx.Commit()
+			if err != nil {
+				logger.Errorf("failed to commit transaction: " + err.Error())
+				continue
+			}
+		} else if len(contactUpdate.contacts) > 0 {
+			err := contactUpdate.sqlStore.putContactNamesBatch(contactUpdate.sqlStore.db, contactUpdate.contacts)
+			if err != nil {
+				logger.Errorf(err.Error())
+				continue
+			}
+		} else {
+			continue
+		}
+		contactUpdate.sqlStore.contactCacheLock.Lock()
+		// Just clear the cache, fetching pushnames and business names would be too much effort
+		// I'll do it myself then F U XD
+		for _, updates := range contactUpdate.contacts {
+			delete(contactUpdate.sqlStore.contactCache, updates.JID)
+		}
+		contactUpdate.sqlStore.contactCacheLock.Unlock()
+	}
+}
+
+func ManageSenderKeys() {
+	for update := range senderkeysChannel {
+		err := manageSingleSenderKey(update)
+		update.err <- err
+	}
+}
+
+func manageSingleSenderKey(senderkeyUpdate senderkeyUpdate) error {
+	senderkeyUpdate.sqlStore.mutex.Lock()
+	defer senderkeyUpdate.sqlStore.mutex.Unlock()
+	if senderkeyUpdate.sqlStore.dialect == "sqlserver" {
+		_, err := senderkeyUpdate.sqlStore.db.Exec(mssqlPutSenderKeyQuery, senderkeyUpdate.sqlStore.JID, senderkeyUpdate.group, senderkeyUpdate.user, senderkeyUpdate.session)
+		return err
+	}
+	_, err := senderkeyUpdate.sqlStore.db.Exec(sqlitePutSenderKeyQuery, senderkeyUpdate.sqlStore.JID, senderkeyUpdate.group, senderkeyUpdate.user, senderkeyUpdate.session)
+	return err
+}
+
+func ManageSessions() {
+	for update := range sessionsChannel {
+		err := manageSingleSession(update)
+		update.err <- err
+	}
+}
+
+func manageSingleSession(sessionUpdate sessionUpdate) error {
+	sessionUpdate.sqlStore.mutex.Lock()
+	defer sessionUpdate.sqlStore.mutex.Unlock()
+	var err error
+	if sessionUpdate.sqlStore.dialect == "sqlserver" {
+		_, err = sessionUpdate.sqlStore.db.Exec(mssqlPutSessionQuery, sessionUpdate.sqlStore.JID, sessionUpdate.address, sessionUpdate.session)
+	} else {
+		_, err = sessionUpdate.sqlStore.db.Exec(sqlitePutSessionQuery, sessionUpdate.sqlStore.JID, sessionUpdate.address, sessionUpdate.session)
+	}
+	return err
 }
 
 var _ store.IdentityStore = (*SQLStore)(nil)
@@ -66,33 +181,61 @@ var _ store.AppStateStore = (*SQLStore)(nil)
 var _ store.ContactStore = (*SQLStore)(nil)
 
 const (
-	putIdentityQuery = `
-		INSERT INTO whatsmeow_identity_keys (our_jid, their_id, identity) VALUES ($1, $2, $3)
+	mssqlPutIdentityQuery = `
+	MERGE INTO whatsmeow_identity_keys AS target
+	USING (VALUES (@p1, @p2, @p3)) AS source (our_jid, their_id, identity_info)
+	   ON (target.our_jid = source.our_jid AND target.their_id = source.their_id)
+	WHEN MATCHED THEN
+	   UPDATE SET target.identity_info = source.identity_info
+	WHEN NOT MATCHED THEN
+	   INSERT (our_jid, their_id, identity_info)
+	   VALUES (source.our_jid, source.their_id, source.identity_info);
+	`
+	sqlitePutIdentityQuery = `
+	INSERT INTO whatsmeow_identity_keys (our_jid, their_id, identity) VALUES (@p1, @p2, @p3)
 		ON CONFLICT (our_jid, their_id) DO UPDATE SET identity=excluded.identity
 	`
-	deleteAllIdentitiesQuery = `DELETE FROM whatsmeow_identity_keys WHERE our_jid=$1 AND their_id LIKE $2`
-	deleteIdentityQuery      = `DELETE FROM whatsmeow_identity_keys WHERE our_jid=$1 AND their_id=$2`
-	getIdentityQuery         = `SELECT identity FROM whatsmeow_identity_keys WHERE our_jid=$1 AND their_id=$2`
+	deleteAllIdentitiesQuery = `DELETE FROM whatsmeow_identity_keys WHERE our_jid=@p1 AND their_id LIKE @p2`
+	deleteIdentityQuery      = `DELETE FROM whatsmeow_identity_keys WHERE our_jid=@p1 AND their_id=@p2`
+	sqliteGetIdentityQuery   = `SELECT identity FROM whatsmeow_identity_keys WHERE our_jid=@p1 AND their_id=@p2`
+	mssqlGetIdentityQuery    = `SELECT identity_info FROM whatsmeow_identity_keys WITH (NOLOCK) WHERE our_jid=@p1 AND their_id=@p2`
 )
 
 func (s *SQLStore) PutIdentity(address string, key [32]byte) error {
-	_, err := s.db.Exec(putIdentityQuery, s.JID, address, key[:])
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	if s.dialect == "sqlserver" {
+		_, err := s.db.Exec(mssqlPutIdentityQuery, s.JID, address, key[:])
+		return err
+	}
+	_, err := s.db.Exec(sqlitePutIdentityQuery, s.JID, address, key[:])
 	return err
 }
 
 func (s *SQLStore) DeleteAllIdentities(phone string) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
 	_, err := s.db.Exec(deleteAllIdentitiesQuery, s.JID, phone+":%")
 	return err
 }
 
 func (s *SQLStore) DeleteIdentity(address string) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
 	_, err := s.db.Exec(deleteAllIdentitiesQuery, s.JID, address)
 	return err
 }
 
 func (s *SQLStore) IsTrustedIdentity(address string, key [32]byte) (bool, error) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
 	var existingIdentity []byte
-	err := s.db.QueryRow(getIdentityQuery, s.JID, address).Scan(&existingIdentity)
+	var err error
+	if s.dialect == "sqlserver" {
+		err = s.db.QueryRow(mssqlGetIdentityQuery, s.JID, address).Scan(&existingIdentity)
+	} else {
+		err = s.db.QueryRow(sqliteGetIdentityQuery, s.JID, address).Scan(&existingIdentity)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		// Trust if not known, it'll be saved automatically later
 		return true, nil
@@ -105,14 +248,26 @@ func (s *SQLStore) IsTrustedIdentity(address string, key [32]byte) (bool, error)
 }
 
 const (
-	getSessionQuery = `SELECT session FROM whatsmeow_sessions WHERE our_jid=$1 AND their_id=$2`
-	hasSessionQuery = `SELECT true FROM whatsmeow_sessions WHERE our_jid=$1 AND their_id=$2`
-	putSessionQuery = `
-		INSERT INTO whatsmeow_sessions (our_jid, their_id, session) VALUES ($1, $2, $3)
+	getSessionQuery       = `SELECT session FROM whatsmeow_sessions WITH (NOLOCK) WHERE our_jid=@p1 AND their_id=@p2`
+	sqliteHasSessionQuery = `SELECT true FROM whatsmeow_sessions WHERE our_jid=@p1 AND their_id=@p2`
+	mssqlHasSessionQuery  = `SELECT 1 FROM whatsmeow_sessions WITH (NOLOCK) WHERE our_jid=@p1 AND their_id=@p2`
+	mssqlHasDeviceManager = `SELECT 1 FROM whatsmeow_device WITH (NOLOCK) WHERE manager_id=@p1`
+	sqlitePutSessionQuery = `
+		INSERT INTO whatsmeow_sessions (our_jid, their_id, session) VALUES (@p1, @p2, @p3)
 		ON CONFLICT (our_jid, their_id) DO UPDATE SET session=excluded.session
 	`
-	deleteAllSessionsQuery = `DELETE FROM whatsmeow_sessions WHERE our_jid=$1 AND their_id LIKE $2`
-	deleteSessionQuery     = `DELETE FROM whatsmeow_sessions WHERE our_jid=$1 AND their_id=$2`
+	mssqlPutSessionQuery = `
+	MERGE INTO whatsmeow_sessions AS target
+	USING (VALUES (@p1, @p2, @p3)) AS source (our_jid, their_id, session)
+	ON (target.our_jid = source.our_jid AND target.their_id = source.their_id)
+	WHEN MATCHED THEN
+    	UPDATE SET target.session = source.session
+	WHEN NOT MATCHED THEN
+    	INSERT (our_jid, their_id, session)
+    	VALUES (source.our_jid, source.their_id, source.session);
+	`
+	deleteAllSessionsQuery = `DELETE FROM whatsmeow_sessions WHERE our_jid=@p1 AND their_id LIKE @p2`
+	deleteSessionQuery     = `DELETE FROM whatsmeow_sessions WHERE our_jid=@p1 AND their_id=@p2`
 )
 
 func (s *SQLStore) GetSession(address string) (session []byte, err error) {
@@ -124,7 +279,11 @@ func (s *SQLStore) GetSession(address string) (session []byte, err error) {
 }
 
 func (s *SQLStore) HasSession(address string) (has bool, err error) {
-	err = s.db.QueryRow(hasSessionQuery, s.JID, address).Scan(&has)
+	if s.dialect == "sqlserver" {
+		err = s.db.QueryRow(mssqlHasSessionQuery, s.JID, address).Scan(&has)
+	} else {
+		err = s.db.QueryRow(sqliteHasSessionQuery, s.JID, address).Scan(&has)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		err = nil
 	}
@@ -132,33 +291,59 @@ func (s *SQLStore) HasSession(address string) (has bool, err error) {
 }
 
 func (s *SQLStore) PutSession(address string, session []byte) error {
-	_, err := s.db.Exec(putSessionQuery, s.JID, address, session)
-	return err
+	res := make(chan error, 1)
+	sessionsChannel <- sessionUpdate{
+		address:  address,
+		session:  session,
+		sqlStore: s,
+		err:      res,
+	}
+	for err := range res {
+		return err
+	}
+	return nil
 }
 
 func (s *SQLStore) DeleteAllSessions(phone string) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
 	_, err := s.db.Exec(deleteAllSessionsQuery, s.JID, phone+":%")
 	return err
 }
 
 func (s *SQLStore) DeleteSession(address string) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
 	_, err := s.db.Exec(deleteSessionQuery, s.JID, address)
 	return err
 }
 
 const (
-	getLastPreKeyIDQuery        = `SELECT MAX(key_id) FROM whatsmeow_pre_keys WHERE jid=$1`
-	insertPreKeyQuery           = `INSERT INTO whatsmeow_pre_keys (jid, key_id, key, uploaded) VALUES ($1, $2, $3, $4)`
-	getUnuploadedPreKeysQuery   = `SELECT key_id, key FROM whatsmeow_pre_keys WHERE jid=$1 AND uploaded=false ORDER BY key_id LIMIT $2`
-	getPreKeyQuery              = `SELECT key_id, key FROM whatsmeow_pre_keys WHERE jid=$1 AND key_id=$2`
-	deletePreKeyQuery           = `DELETE FROM whatsmeow_pre_keys WHERE jid=$1 AND key_id=$2`
-	markPreKeysAsUploadedQuery  = `UPDATE whatsmeow_pre_keys SET uploaded=true WHERE jid=$1 AND key_id<=$2`
-	getUploadedPreKeyCountQuery = `SELECT COUNT(*) FROM whatsmeow_pre_keys WHERE jid=$1 AND uploaded=true`
+	getLastPreKeyIDQuery              = `SELECT MAX(key_id) FROM whatsmeow_pre_keys WITH (NOLOCK) WHERE jid=@p1`
+	mssqlInsertPreKeyQuery            = `INSERT INTO whatsmeow_pre_keys (jid, key_id, key_info, uploaded) VALUES (@p1, @p2, @p3, @p4)`
+	sqliteInsertPreKeyQuery           = `INSERT INTO whatsmeow_pre_keys (jid, key_id, key, uploaded) VALUES (@p1, @p2, @p3, @p4)`
+	sqliteGetUnuploadedPreKeysQuery   = `SELECT key_id, key FROM whatsmeow_pre_keys WHERE jid=@p1 AND uploaded=false ORDER BY key_id LIMIT @p2`
+	mssqlGetUnuploadedPreKeysQuery    = `SELECT TOP 1 key_id, key_info FROM whatsmeow_pre_keys WITH (NOLOCK) WHERE jid=@p2 AND uploaded=0 ORDER BY key_id`
+	sqliteGetPreKeyQuery              = `SELECT key_id, key FROM whatsmeow_pre_keys WHERE jid=@p1 AND key_id=@p2`
+	mssqlGetPreKeyQuery               = `SELECT key_id, key_info FROM whatsmeow_pre_keys WITH (NOLOCK) WHERE jid=@p1 AND key_id=@p2`
+	deletePreKeyQuery                 = `DELETE FROM whatsmeow_pre_keys WHERE jid=@p1 AND key_id=@p2`
+	mssqlMarkPreKeysAsUploadedQuery   = `UPDATE whatsmeow_pre_keys SET uploaded=1 WHERE jid=@p1 AND key_id<=@p2`
+	sqliteMarkPreKeysAsUploadedQuery  = `UPDATE whatsmeow_pre_keys SET uploaded=true WHERE jid=@p1 AND key_id<=@p2`
+	sqliteGetUploadedPreKeyCountQuery = `SELECT COUNT(*) FROM whatsmeow_pre_keys WHERE jid=@p1 AND uploaded=true`
+	mssqlGetUploadedPreKeyCountQuery  = `SELECT COUNT(*) FROM whatsmeow_pre_keys WITH (NOLOCK) WHERE jid=@p1 AND uploaded=1`
 )
 
 func (s *SQLStore) genOnePreKey(id uint32, markUploaded bool) (*keys.PreKey, error) {
 	key := keys.NewPreKey(id)
-	_, err := s.db.Exec(insertPreKeyQuery, s.JID, key.KeyID, key.Priv[:], markUploaded)
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	var err error
+	if s.dialect == "sqlserver" {
+		_, err = s.db.Exec(mssqlInsertPreKeyQuery, s.JID, key.KeyID, key.Priv[:], markUploaded)
+	} else {
+		_, err = s.db.Exec(sqliteInsertPreKeyQuery, s.JID, key.KeyID, key.Priv[:], markUploaded)
+	}
+
 	return key, err
 }
 
@@ -184,8 +369,13 @@ func (s *SQLStore) GenOnePreKey() (*keys.PreKey, error) {
 func (s *SQLStore) GetOrGenPreKeys(count uint32) ([]*keys.PreKey, error) {
 	s.preKeyLock.Lock()
 	defer s.preKeyLock.Unlock()
-
-	res, err := s.db.Query(getUnuploadedPreKeysQuery, s.JID, count)
+	var err error
+	var res *sql.Rows
+	if s.dialect == "sqlserver" {
+		res, err = s.db.Query(mssqlGetUnuploadedPreKeysQuery, count, s.JID)
+	} else {
+		res, err = s.db.Query(sqliteGetUnuploadedPreKeysQuery, s.JID, count)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to query existing prekeys: %w", err)
 	}
@@ -238,35 +428,70 @@ func scanPreKey(row scannable) (*keys.PreKey, error) {
 }
 
 func (s *SQLStore) GetPreKey(id uint32) (*keys.PreKey, error) {
-	return scanPreKey(s.db.QueryRow(getPreKeyQuery, s.JID, id))
+	if s.dialect == "sqlserver" {
+		return scanPreKey(s.db.QueryRow(mssqlGetPreKeyQuery, s.JID, id))
+	}
+	return scanPreKey(s.db.QueryRow(sqliteGetPreKeyQuery, s.JID, id))
 }
 
 func (s *SQLStore) RemovePreKey(id uint32) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
 	_, err := s.db.Exec(deletePreKeyQuery, s.JID, id)
 	return err
 }
 
 func (s *SQLStore) MarkPreKeysAsUploaded(upToID uint32) error {
-	_, err := s.db.Exec(markPreKeysAsUploadedQuery, s.JID, upToID)
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	if s.dialect == "sqlserver" {
+		_, err := s.db.Exec(mssqlMarkPreKeysAsUploadedQuery, s.JID, upToID)
+		return err
+	}
+	_, err := s.db.Exec(sqliteMarkPreKeysAsUploadedQuery, s.JID, upToID)
 	return err
 }
 
 func (s *SQLStore) UploadedPreKeyCount() (count int, err error) {
-	err = s.db.QueryRow(getUploadedPreKeyCountQuery, s.JID).Scan(&count)
+	if s.dialect == "sqlserver" {
+		err = s.db.QueryRow(mssqlGetUploadedPreKeyCountQuery, s.JID).Scan(&count)
+		return
+	}
+	err = s.db.QueryRow(sqliteGetUploadedPreKeyCountQuery, s.JID).Scan(&count)
 	return
 }
 
 const (
-	getSenderKeyQuery = `SELECT sender_key FROM whatsmeow_sender_keys WHERE our_jid=$1 AND chat_id=$2 AND sender_id=$3`
-	putSenderKeyQuery = `
-		INSERT INTO whatsmeow_sender_keys (our_jid, chat_id, sender_id, sender_key) VALUES ($1, $2, $3, $4)
+	getSenderKeyQuery       = `SELECT sender_key FROM whatsmeow_sender_keys WITH (NOLOCK) WHERE our_jid=@p1 AND chat_id=@p2 AND sender_id=@p3`
+	sqlitePutSenderKeyQuery = `
+		INSERT INTO whatsmeow_sender_keys (our_jid, chat_id, sender_id, sender_key) VALUES (@p1, @p2, @p3, @p4)
 		ON CONFLICT (our_jid, chat_id, sender_id) DO UPDATE SET sender_key=excluded.sender_key
+	`
+	mssqlPutSenderKeyQuery = `
+		MERGE INTO whatsmeow_sender_keys AS target
+		USING (VALUES (@p1, @p2, @p3, @p4)) AS source (our_jid, chat_id, sender_id, sender_key)
+		ON (target.our_jid = source.our_jid AND target.chat_id = source.chat_id AND target.sender_id = source.sender_id)
+		WHEN MATCHED THEN
+			UPDATE SET target.sender_key = source.sender_key
+		WHEN NOT MATCHED THEN
+			INSERT (our_jid, chat_id, sender_id, sender_key)
+			VALUES (source.our_jid, source.chat_id, source.sender_id, source.sender_key);
 	`
 )
 
 func (s *SQLStore) PutSenderKey(group, user string, session []byte) error {
-	_, err := s.db.Exec(putSenderKeyQuery, s.JID, group, user, session)
-	return err
+	res := make(chan error, 1)
+	senderkeysChannel <- senderkeyUpdate{
+		group:    group,
+		user:     user,
+		session:  session,
+		sqlStore: s,
+		err:      res,
+	}
+	for err := range res {
+		return err
+	}
+	return nil
 }
 
 func (s *SQLStore) GetSenderKey(group, user string) (key []byte, err error) {
@@ -278,24 +503,47 @@ func (s *SQLStore) GetSenderKey(group, user string) (key []byte, err error) {
 }
 
 const (
-	putAppStateSyncKeyQuery = `
-		INSERT INTO whatsmeow_app_state_sync_keys (jid, key_id, key_data, timestamp, fingerprint) VALUES ($1, $2, $3, $4, $5)
+	sqlitePutAppStateSyncKeyQuery = `
+		INSERT INTO whatsmeow_app_state_sync_keys (jid, key_id, key_data, timestamp, fingerprint) VALUES (@p1, @p2, @p3, @p4, @p5)
 		ON CONFLICT (jid, key_id) DO UPDATE
 			SET key_data=excluded.key_data, timestamp=excluded.timestamp, fingerprint=excluded.fingerprint
 			WHERE excluded.timestamp > whatsmeow_app_state_sync_keys.timestamp
 	`
-	getAppStateSyncKeyQuery         = `SELECT key_data, timestamp, fingerprint FROM whatsmeow_app_state_sync_keys WHERE jid=$1 AND key_id=$2`
-	getLatestAppStateSyncKeyIDQuery = `SELECT key_id FROM whatsmeow_app_state_sync_keys WHERE jid=$1 ORDER BY timestamp DESC LIMIT 1`
+	mssqlPutAppStateSyncKeyQuery = `
+		MERGE INTO whatsmeow_app_state_sync_keys AS target
+		USING (VALUES (@p1, @p2, @p3, @p4, @p5)) AS source (jid, key_id, key_data, timestamp_info, fingerprint)
+		ON (target.jid = source.jid AND target.key_id = source.key_id)
+		WHEN MATCHED AND source.timestamp_info > target.timestamp_info THEN
+			UPDATE SET target.key_data = source.key_data, target.timestamp_info = source.timestamp_info, target.fingerprint = source.fingerprint
+		WHEN NOT MATCHED THEN
+			INSERT (jid, key_id, key_data, timestamp_info, fingerprint)
+			VALUES (source.jid, source.key_id, source.key_data, source.timestamp_info, source.fingerprint);
+	`
+	sqliteGetAppStateSyncKeyQuery         = `SELECT key_data, timestamp, fingerprint FROM whatsmeow_app_state_sync_keys WHERE jid=@p1 AND key_id=@p2`
+	mssqlGetAppStateSyncKeyQuery          = `SELECT key_data, timestamp_info, fingerprint FROM whatsmeow_app_state_sync_keys WITH (NOLOCK) WHERE jid=@p1 AND key_id=@p2`
+	sqliteGetLatestAppStateSyncKeyIDQuery = `SELECT key_id FROM whatsmeow_app_state_sync_keys WHERE jid=@p1 ORDER BY timestamp DESC LIMIT 1`
+	mssqlGetLatestAppStateSyncKeyIDQuery  = `SELECT TOP 1 key_id FROM whatsmeow_app_state_sync_keys WITH (NOLOCK) WHERE jid=@p1 ORDER BY timestamp_info DESC`
 )
 
 func (s *SQLStore) PutAppStateSyncKey(id []byte, key store.AppStateSyncKey) error {
-	_, err := s.db.Exec(putAppStateSyncKeyQuery, s.JID, id, key.Data, key.Timestamp, key.Fingerprint)
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	if s.dialect == "sqlserver" {
+		_, err := s.db.Exec(mssqlPutAppStateSyncKeyQuery, s.JID, id, key.Data, key.Timestamp, key.Fingerprint)
+		return err
+	}
+	_, err := s.db.Exec(sqlitePutAppStateSyncKeyQuery, s.JID, id, key.Data, key.Timestamp, key.Fingerprint)
 	return err
 }
 
 func (s *SQLStore) GetAppStateSyncKey(id []byte) (*store.AppStateSyncKey, error) {
 	var key store.AppStateSyncKey
-	err := s.db.QueryRow(getAppStateSyncKeyQuery, s.JID, id).Scan(&key.Data, &key.Timestamp, &key.Fingerprint)
+	var err error
+	if s.dialect == "sqlserver" {
+		err = s.db.QueryRow(mssqlGetAppStateSyncKeyQuery, s.JID, id).Scan(&key.Data, &key.Timestamp, &key.Fingerprint)
+	} else {
+		err = s.db.QueryRow(sqliteGetAppStateSyncKeyQuery, s.JID, id).Scan(&key.Data, &key.Timestamp, &key.Fingerprint)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -304,7 +552,12 @@ func (s *SQLStore) GetAppStateSyncKey(id []byte) (*store.AppStateSyncKey, error)
 
 func (s *SQLStore) GetLatestAppStateSyncKeyID() ([]byte, error) {
 	var keyID []byte
-	err := s.db.QueryRow(getLatestAppStateSyncKeyIDQuery, s.JID).Scan(&keyID)
+	var err error
+	if s.dialect == "sqlserver" {
+		err = s.db.QueryRow(mssqlGetLatestAppStateSyncKeyIDQuery, s.JID).Scan(&keyID)
+	} else {
+		err = s.db.QueryRow(sqliteGetLatestAppStateSyncKeyIDQuery, s.JID).Scan(&keyID)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -312,26 +565,49 @@ func (s *SQLStore) GetLatestAppStateSyncKeyID() ([]byte, error) {
 }
 
 const (
-	putAppStateVersionQuery = `
-		INSERT INTO whatsmeow_app_state_version (jid, name, version, hash) VALUES ($1, $2, $3, $4)
+	sqlitePutAppStateVersionQuery = `
+		INSERT INTO whatsmeow_app_state_version (jid, name, version, hash) VALUES (@p1, @p2, @p3, @p4)
 		ON CONFLICT (jid, name) DO UPDATE SET version=excluded.version, hash=excluded.hash
 	`
-	getAppStateVersionQuery                 = `SELECT version, hash FROM whatsmeow_app_state_version WHERE jid=$1 AND name=$2`
-	deleteAppStateVersionQuery              = `DELETE FROM whatsmeow_app_state_version WHERE jid=$1 AND name=$2`
-	putAppStateMutationMACsQuery            = `INSERT INTO whatsmeow_app_state_mutation_macs (jid, name, version, index_mac, value_mac) VALUES `
-	deleteAppStateMutationMACsQueryPostgres = `DELETE FROM whatsmeow_app_state_mutation_macs WHERE jid=$1 AND name=$2 AND index_mac=ANY($3::bytea[])`
-	deleteAppStateMutationMACsQueryGeneric  = `DELETE FROM whatsmeow_app_state_mutation_macs WHERE jid=$1 AND name=$2 AND index_mac IN `
-	getAppStateMutationMACQuery             = `SELECT value_mac FROM whatsmeow_app_state_mutation_macs WHERE jid=$1 AND name=$2 AND index_mac=$3 ORDER BY version DESC LIMIT 1`
+	mssqlPutAppStateVersionQuery = `
+		MERGE INTO whatsmeow_app_state_version AS target
+		USING (VALUES (@p1, @p2, @p3, @p4)) AS source (jid, name, version_info, hash)
+		ON (target.jid = source.jid AND target.name = source.name)
+		WHEN MATCHED THEN
+			UPDATE SET target.version_info = source.version_info, target.hash = source.hash
+		WHEN NOT MATCHED THEN
+			INSERT (jid, name, version_info, hash)
+			VALUES (source.jid, source.name, source.version_info, source.hash);
+	`
+	sqliteGetAppStateVersionQuery           = `SELECT version, hash FROM whatsmeow_app_state_version WHERE jid=@p1 AND name=@p2`
+	mssqlGetAppStateVersionQuery            = `SELECT version_info, hash FROM whatsmeow_app_state_version WITH (NOLOCK) WHERE jid=@p1 AND name=@p2`
+	deleteAppStateVersionQuery              = `DELETE FROM whatsmeow_app_state_version WHERE jid=@p1 AND name=@p2`
+	sqlitePutAppStateMutationMACsQuery      = `INSERT INTO whatsmeow_app_state_mutation_macs (jid, name, version, index_mac, value_mac) VALUES `
+	mssqlPutAppStateMutationMACsQuery       = `INSERT INTO whatsmeow_app_state_mutation_macs (jid, name, version_info, index_mac, value_mac) VALUES `
+	deleteAppStateMutationMACsQueryPostgres = `DELETE FROM whatsmeow_app_state_mutation_macs WHERE jid=@p1 AND name=@p2 AND index_mac=ANY(@p3::bytea[])`
+	deleteAppStateMutationMACsQueryGeneric  = `DELETE FROM whatsmeow_app_state_mutation_macs WHERE jid=@p1 AND name=@p2 AND index_mac IN `
+	sqliteGetAppStateMutationMACQuery       = `SELECT value_mac FROM whatsmeow_app_state_mutation_macs WHERE jid=@p1 AND name=@p2 AND index_mac=@p3 ORDER BY version DESC LIMIT 1`
+	mssqlGetAppStateMutationMACQuery        = `SELECT TOP 1 value_mac FROM whatsmeow_app_state_mutation_macs WITH (NOLOCK) WHERE jid=@p1 AND name=@p2 AND index_mac=@p3 ORDER BY version_info DESC`
 )
 
 func (s *SQLStore) PutAppStateVersion(name string, version uint64, hash [128]byte) error {
-	_, err := s.db.Exec(putAppStateVersionQuery, s.JID, name, version, hash[:])
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	if s.dialect == "sqlserver" {
+		_, err := s.db.Exec(mssqlPutAppStateVersionQuery, s.JID, name, version, hash[:])
+		return err
+	}
+	_, err := s.db.Exec(sqlitePutAppStateVersionQuery, s.JID, name, version, hash[:])
 	return err
 }
 
 func (s *SQLStore) GetAppStateVersion(name string) (version uint64, hash [128]byte, err error) {
 	var uncheckedHash []byte
-	err = s.db.QueryRow(getAppStateVersionQuery, s.JID, name).Scan(&version, &uncheckedHash)
+	if s.dialect == "sqlserver" {
+		err = s.db.QueryRow(mssqlGetAppStateVersionQuery, s.JID, name).Scan(&version, &uncheckedHash)
+	} else {
+		err = s.db.QueryRow(sqliteGetAppStateVersionQuery, s.JID, name).Scan(&version, &uncheckedHash)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		// version will be 0 and hash will be an empty array, which is the correct initial state
 		err = nil
@@ -348,6 +624,8 @@ func (s *SQLStore) GetAppStateVersion(name string) (version uint64, hash [128]by
 }
 
 func (s *SQLStore) DeleteAppStateVersion(name string) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
 	_, err := s.db.Exec(deleteAppStateVersionQuery, s.JID, name)
 	return err
 }
@@ -362,7 +640,7 @@ func (s *SQLStore) putAppStateMutationMACs(tx execable, name string, version uin
 	values[0] = s.JID
 	values[1] = name
 	values[2] = version
-	placeholderSyntax := "($1, $2, $3, $%d, $%d)"
+	placeholderSyntax := "(@p1, @p2, @p3, @p%d, @p%d)"
 	if s.dialect == "sqlite3" {
 		placeholderSyntax = "(?1, ?2, ?3, ?%d, ?%d)"
 	}
@@ -372,7 +650,11 @@ func (s *SQLStore) putAppStateMutationMACs(tx execable, name string, version uin
 		values[baseIndex+1] = mutation.ValueMAC
 		queryParts[i] = fmt.Sprintf(placeholderSyntax, baseIndex+1, baseIndex+2)
 	}
-	_, err := tx.Exec(putAppStateMutationMACsQuery+strings.Join(queryParts, ","), values...)
+	if s.dialect == "sqlserver" {
+		_, err := tx.Exec(mssqlPutAppStateMutationMACsQuery+strings.Join(queryParts, ","), values...)
+		return err
+	}
+	_, err := tx.Exec(sqlitePutAppStateMutationMACsQuery+strings.Join(queryParts, ","), values...)
 	return err
 }
 
@@ -421,7 +703,7 @@ func (s *SQLStore) DeleteAppStateMutationMACs(name string, indexMACs [][]byte) (
 		queryParts := make([]string, len(indexMACs))
 		for i, item := range indexMACs {
 			args[2+i] = item
-			queryParts[i] = fmt.Sprintf("$%d", i+3)
+			queryParts[i] = fmt.Sprintf("@p%d", i+3)
 		}
 		_, err = s.db.Exec(deleteAppStateMutationMACsQueryGeneric+"("+strings.Join(queryParts, ",")+")", args...)
 	}
@@ -429,7 +711,11 @@ func (s *SQLStore) DeleteAppStateMutationMACs(name string, indexMACs [][]byte) (
 }
 
 func (s *SQLStore) GetAppStateMutationMAC(name string, indexMAC []byte) (valueMAC []byte, err error) {
-	err = s.db.QueryRow(getAppStateMutationMACQuery, s.JID, name, indexMAC).Scan(&valueMAC)
+	if s.dialect == "sqlserver" {
+		err = s.db.QueryRow(mssqlGetAppStateMutationMACQuery, s.JID, name, indexMAC).Scan(&valueMAC)
+	} else {
+		err = s.db.QueryRow(sqliteGetAppStateMutationMACQuery, s.JID, name, indexMAC).Scan(&valueMAC)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		err = nil
 	}
@@ -437,28 +723,68 @@ func (s *SQLStore) GetAppStateMutationMAC(name string, indexMAC []byte) (valueMA
 }
 
 const (
-	putContactNameQuery = `
-		INSERT INTO whatsmeow_contacts (our_jid, their_jid, first_name, full_name) VALUES ($1, $2, $3, $4)
+	sqlitePutContactNameQuery = `
+		INSERT INTO whatsmeow_contacts (our_jid, their_jid, first_name, full_name) VALUES (@p1, @p2, @p3, @p4)
 		ON CONFLICT (our_jid, their_jid) DO UPDATE SET first_name=excluded.first_name, full_name=excluded.full_name
 	`
-	putManyContactNamesQuery = `
+	mssqlPutContactNameQuery = `
+		MERGE INTO whatsmeow_contacts AS target
+		USING (VALUES (@p1, @p2, @p3, @p4)) AS source (our_jid, their_jid, first_name, full_name)
+		ON (target.our_jid = source.our_jid AND target.their_jid = source.their_jid)
+		WHEN MATCHED THEN
+			UPDATE SET target.first_name = source.first_name, target.full_name = source.full_name
+		WHEN NOT MATCHED THEN
+			INSERT (our_jid, their_jid, first_name, full_name)
+			VALUES (source.our_jid, source.their_jid, source.first_name, source.full_name);
+	`
+	sqlitePutManyContactNamesQuery = `
 		INSERT INTO whatsmeow_contacts (our_jid, their_jid, first_name, full_name)
 		VALUES %s
 		ON CONFLICT (our_jid, their_jid) DO UPDATE SET first_name=excluded.first_name, full_name=excluded.full_name
 	`
-	putPushNameQuery = `
-		INSERT INTO whatsmeow_contacts (our_jid, their_jid, push_name) VALUES ($1, $2, $3)
+	mssqlPutManyContactNamesQuery = `
+		MERGE INTO whatsmeow_contacts AS target
+		USING (VALUES %s) AS source (our_jid, their_jid, first_name, full_name)
+		ON (target.our_jid = source.our_jid AND target.their_jid = source.their_jid)
+		WHEN MATCHED THEN
+			UPDATE SET target.first_name = source.first_name, target.full_name = source.full_name
+		WHEN NOT MATCHED THEN
+			INSERT (our_jid, their_jid, first_name, full_name)
+			VALUES (source.our_jid, source.their_jid, source.first_name, source.full_name);
+	`
+	sqlitePutPushNameQuery = `
+		INSERT INTO whatsmeow_contacts (our_jid, their_jid, push_name) VALUES (@p1, @p2, @p3)
 		ON CONFLICT (our_jid, their_jid) DO UPDATE SET push_name=excluded.push_name
 	`
-	putBusinessNameQuery = `
-		INSERT INTO whatsmeow_contacts (our_jid, their_jid, business_name) VALUES ($1, $2, $3)
+	mssqlPutPushNameQuery = `
+		MERGE INTO whatsmeow_contacts AS target
+		USING (VALUES (@p1, @p2, @p3)) AS source (our_jid, their_jid, push_name)
+		ON (target.our_jid = source.our_jid AND target.their_jid = source.their_jid)
+		WHEN MATCHED THEN
+			UPDATE SET target.push_name = source.push_name
+		WHEN NOT MATCHED THEN
+			INSERT (our_jid, their_jid, push_name)
+			VALUES (source.our_jid, source.their_jid, source.push_name);
+	`
+	sqlitePutBusinessNameQuery = `
+		INSERT INTO whatsmeow_contacts (our_jid, their_jid, business_name) VALUES (@p1, @p2, @p3)
 		ON CONFLICT (our_jid, their_jid) DO UPDATE SET business_name=excluded.business_name
 	`
+	mssqlPutBusinessNameQuery = `
+		MERGE INTO whatsmeow_contacts AS target
+		USING (VALUES (@p1, @p2, @p3)) AS source (our_jid, their_jid, business_name)
+		ON (target.our_jid = source.our_jid AND target.their_jid = source.their_jid)
+		WHEN MATCHED THEN
+			UPDATE SET target.business_name = source.business_name
+		WHEN NOT MATCHED THEN
+			INSERT (our_jid, their_jid, business_name)
+			VALUES (source.our_jid, source.their_jid, source.business_name);
+	`
 	getContactQuery = `
-		SELECT first_name, full_name, push_name, business_name FROM whatsmeow_contacts WHERE our_jid=$1 AND their_jid=$2
+		SELECT first_name, full_name, push_name, business_name FROM whatsmeow_contacts WITH (NOLOCK) WHERE our_jid=@p1 AND their_jid=@p2
 	`
 	getAllContactsQuery = `
-		SELECT their_jid, first_name, full_name, push_name, business_name FROM whatsmeow_contacts WHERE our_jid=$1
+		SELECT their_jid, first_name, full_name, push_name, business_name FROM whatsmeow_contacts WITH (NOLOCK) WHERE our_jid=@p1
 	`
 )
 
@@ -471,7 +797,11 @@ func (s *SQLStore) PutPushName(user types.JID, pushName string) (bool, string, e
 		return false, "", err
 	}
 	if cached.PushName != pushName {
-		_, err = s.db.Exec(putPushNameQuery, s.JID, user, pushName)
+		if s.dialect == "sqlserver" {
+			_, err = s.db.Exec(mssqlPutPushNameQuery, s.JID, user, pushName)
+		} else {
+			_, err = s.db.Exec(sqlitePutPushNameQuery, s.JID, user, pushName)
+		}
 		if err != nil {
 			return false, "", err
 		}
@@ -492,7 +822,11 @@ func (s *SQLStore) PutBusinessName(user types.JID, businessName string) (bool, s
 		return false, "", err
 	}
 	if cached.BusinessName != businessName {
-		_, err = s.db.Exec(putBusinessNameQuery, s.JID, user, businessName)
+		if s.dialect == "sqlserver" {
+			_, err = s.db.Exec(mssqlPutBusinessNameQuery, s.JID, user, businessName)
+		} else {
+			_, err = s.db.Exec(sqlitePutBusinessNameQuery, s.JID, user, businessName)
+		}
 		if err != nil {
 			return false, "", err
 		}
@@ -513,7 +847,11 @@ func (s *SQLStore) PutContactName(user types.JID, firstName, fullName string) er
 		return err
 	}
 	if cached.FirstName != firstName || cached.FullName != fullName {
-		_, err = s.db.Exec(putContactNameQuery, s.JID, user, firstName, fullName)
+		if s.dialect == "sqlserver" {
+			_, err = s.db.Exec(mssqlPutContactNameQuery, s.JID, user, firstName, fullName)
+		} else {
+			_, err = s.db.Exec(sqlitePutContactNameQuery, s.JID, user, firstName, fullName)
+		}
 		if err != nil {
 			return err
 		}
@@ -530,7 +868,7 @@ func (s *SQLStore) putContactNamesBatch(tx execable, contacts []store.ContactEnt
 	values := make([]interface{}, 1, 1+len(contacts)*3)
 	queryParts := make([]string, 0, len(contacts))
 	values[0] = s.JID
-	placeholderSyntax := "($1, $%d, $%d, $%d)"
+	placeholderSyntax := "(@p1, @p%d, @p%d, @p%d)"
 	if s.dialect == "sqlite3" {
 		placeholderSyntax = "(?1, ?%d, ?%d, ?%d)"
 	}
@@ -553,45 +891,19 @@ func (s *SQLStore) putContactNamesBatch(tx execable, contacts []store.ContactEnt
 		queryParts = append(queryParts, fmt.Sprintf(placeholderSyntax, baseIndex+1, baseIndex+2, baseIndex+3))
 		i++
 	}
-	_, err := tx.Exec(fmt.Sprintf(putManyContactNamesQuery, strings.Join(queryParts, ",")), values...)
+	if s.dialect == "sqlserver" {
+		_, err := tx.Exec(fmt.Sprintf(mssqlPutManyContactNamesQuery, strings.Join(queryParts, ",")), values...)
+		return err
+	}
+	_, err := tx.Exec(fmt.Sprintf(sqlitePutManyContactNamesQuery, strings.Join(queryParts, ",")), values...)
 	return err
 }
 
 func (s *SQLStore) PutAllContactNames(contacts []store.ContactEntry) error {
-	if len(contacts) > contactBatchSize {
-		tx, err := s.db.Begin()
-		if err != nil {
-			return fmt.Errorf("failed to start transaction: %w", err)
-		}
-		for i := 0; i < len(contacts); i += contactBatchSize {
-			var contactSlice []store.ContactEntry
-			if len(contacts) > i+contactBatchSize {
-				contactSlice = contacts[i : i+contactBatchSize]
-			} else {
-				contactSlice = contacts[i:]
-			}
-			err = s.putContactNamesBatch(tx, contactSlice)
-			if err != nil {
-				_ = tx.Rollback()
-				return err
-			}
-		}
-		err = tx.Commit()
-		if err != nil {
-			return fmt.Errorf("failed to commit transaction: %w", err)
-		}
-	} else if len(contacts) > 0 {
-		err := s.putContactNamesBatch(s.db, contacts)
-		if err != nil {
-			return err
-		}
-	} else {
-		return nil
+	contactsChannel <- contactUpdate{
+		sqlStore: s,
+		contacts: contacts,
 	}
-	s.contactCacheLock.Lock()
-	// Just clear the cache, fetching pushnames and business names would be too much effort
-	s.contactCache = make(map[types.JID]*types.ContactInfo)
-	s.contactCacheLock.Unlock()
 	return nil
 }
 
@@ -656,12 +968,22 @@ func (s *SQLStore) GetAllContacts() (map[types.JID]types.ContactInfo, error) {
 }
 
 const (
-	putChatSettingQuery = `
-		INSERT INTO whatsmeow_chat_settings (our_jid, chat_jid, %[1]s) VALUES ($1, $2, $3)
+	sqlitePutChatSettingQuery = `
+		INSERT INTO whatsmeow_chat_settings (our_jid, chat_jid, %[1]s) VALUES (@p1, @p2, @p3)
 		ON CONFLICT (our_jid, chat_jid) DO UPDATE SET %[1]s=excluded.%[1]s
 	`
+	mssqlPutChatSettingQuery = `
+		MERGE INTO whatsmeow_chat_settings AS target
+		USING (VALUES (@p1, @p2, @p3)) AS source (our_jid, chat_jid, %[1]s)
+		ON (target.our_jid = source.our_jid AND target.chat_jid = source.chat_jid)
+		WHEN MATCHED THEN
+			UPDATE SET target.%[1]s = source.%[1]s
+		WHEN NOT MATCHED THEN
+			INSERT (our_jid, chat_jid, %[1]s)
+			VALUES (source.our_jid, source.chat_jid, source.%[1]s);
+	`
 	getChatSettingsQuery = `
-		SELECT muted_until, pinned, archived FROM whatsmeow_chat_settings WHERE our_jid=$1 AND chat_jid=$2
+		SELECT muted_until, pinned, archived FROM whatsmeow_chat_settings WITH (NOLOCK) WHERE our_jid=@p1 AND chat_jid=@p2
 	`
 )
 
@@ -670,17 +992,35 @@ func (s *SQLStore) PutMutedUntil(chat types.JID, mutedUntil time.Time) error {
 	if !mutedUntil.IsZero() {
 		val = mutedUntil.Unix()
 	}
-	_, err := s.db.Exec(fmt.Sprintf(putChatSettingQuery, "muted_until"), s.JID, chat, val)
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	if s.dialect == "sqlserver" {
+		_, err := s.db.Exec(fmt.Sprintf(mssqlPutChatSettingQuery, "muted_until"), s.JID, chat, val)
+		return err
+	}
+	_, err := s.db.Exec(fmt.Sprintf(sqlitePutChatSettingQuery, "muted_until"), s.JID, chat, val)
 	return err
 }
 
 func (s *SQLStore) PutPinned(chat types.JID, pinned bool) error {
-	_, err := s.db.Exec(fmt.Sprintf(putChatSettingQuery, "pinned"), s.JID, chat, pinned)
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	if s.dialect == "sqlserver" {
+		_, err := s.db.Exec(fmt.Sprintf(mssqlPutChatSettingQuery, "pinned"), s.JID, chat, pinned)
+		return err
+	}
+	_, err := s.db.Exec(fmt.Sprintf(sqlitePutChatSettingQuery, "pinned"), s.JID, chat, pinned)
 	return err
 }
 
 func (s *SQLStore) PutArchived(chat types.JID, archived bool) error {
-	_, err := s.db.Exec(fmt.Sprintf(putChatSettingQuery, "archived"), s.JID, chat, archived)
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	if s.dialect == "sqlserver" {
+		_, err := s.db.Exec(fmt.Sprintf(mssqlPutChatSettingQuery, "archived"), s.JID, chat, archived)
+		return err
+	}
+	_, err := s.db.Exec(fmt.Sprintf(sqlitePutChatSettingQuery, "archived"), s.JID, chat, archived)
 	return err
 }
 
@@ -701,13 +1041,28 @@ func (s *SQLStore) GetChatSettings(chat types.JID) (settings types.LocalChatSett
 }
 
 const (
-	putMsgSecret = `
+	sqlitePutMsgSecret = `
 		INSERT INTO whatsmeow_message_secrets (our_jid, chat_jid, sender_jid, message_id, key)
-		VALUES ($1, $2, $3, $4, $5)
+		VALUES (@p1, @p2, @p3, @p4, @p5)
 		ON CONFLICT (our_jid, chat_jid, sender_jid, message_id) DO NOTHING
 	`
-	getMsgSecret = `
-		SELECT key FROM whatsmeow_message_secrets WHERE our_jid=$1 AND chat_jid=$2 AND sender_jid=$3 AND message_id=$4
+	mssqlPutMsgSecret = `
+		INSERT INTO whatsmeow_message_secrets (our_jid, chat_jid, sender_jid, message_id, key_info)
+		SELECT @p1, @p2, @p3, @p4, @p5
+		WHERE NOT EXISTS (
+			SELECT 1
+			FROM whatsmeow_message_secrets
+			WHERE our_jid = @p1
+				AND chat_jid = @p2
+				AND sender_jid = @p3
+				AND message_id = @p4
+		);
+	`
+	sqliteGetMsgSecret = `
+		SELECT key FROM whatsmeow_message_secrets WHERE our_jid=@p1 AND chat_jid=@p2 AND sender_jid=@p3 AND message_id=@p4
+	`
+	mssqlGetMsgSecret = `
+		SELECT key_info FROM whatsmeow_message_secrets WITH (NOLOCK) WHERE our_jid=@p1 AND chat_jid=@p2 AND sender_jid=@p3 AND message_id=@p4
 	`
 )
 
@@ -717,7 +1072,15 @@ func (s *SQLStore) PutMessageSecrets(inserts []store.MessageSecretInsert) (err e
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	for _, insert := range inserts {
-		_, err = tx.Exec(putMsgSecret, s.JID, insert.Chat.ToNonAD(), insert.Sender.ToNonAD(), insert.ID, insert.Secret)
+		if s.dialect == "sqlserver" {
+			_, err = tx.Exec(mssqlPutMsgSecret, s.JID, insert.Chat.ToNonAD(), insert.Sender.ToNonAD(), insert.ID, insert.Secret)
+		} else {
+			_, err = tx.Exec(sqlitePutMsgSecret, s.JID, insert.Chat.ToNonAD(), insert.Sender.ToNonAD(), insert.ID, insert.Secret)
+		}
+		if err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("failed to insert secret "+s.JID+": %w", err)
+		}
 	}
 	err = tx.Commit()
 	if err != nil {
@@ -727,12 +1090,22 @@ func (s *SQLStore) PutMessageSecrets(inserts []store.MessageSecretInsert) (err e
 }
 
 func (s *SQLStore) PutMessageSecret(chat, sender types.JID, id types.MessageID, secret []byte) (err error) {
-	_, err = s.db.Exec(putMsgSecret, s.JID, chat.ToNonAD(), sender.ToNonAD(), id, secret)
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	if s.dialect == "sqlserver" {
+		_, err = s.db.Exec(mssqlPutMsgSecret, s.JID, chat.ToNonAD(), sender.ToNonAD(), id, secret)
+		return
+	}
+	_, err = s.db.Exec(sqlitePutMsgSecret, s.JID, chat.ToNonAD(), sender.ToNonAD(), id, secret)
 	return
 }
 
 func (s *SQLStore) GetMessageSecret(chat, sender types.JID, id types.MessageID) (secret []byte, err error) {
-	err = s.db.QueryRow(getMsgSecret, s.JID, chat.ToNonAD(), sender.ToNonAD(), id).Scan(&secret)
+	if s.dialect == "sqlserver" {
+		err = s.db.QueryRow(mssqlGetMsgSecret, s.JID, chat.ToNonAD(), sender.ToNonAD(), id).Scan(&secret)
+	} else {
+		err = s.db.QueryRow(sqliteGetMsgSecret, s.JID, chat.ToNonAD(), sender.ToNonAD(), id).Scan(&secret)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		err = nil
 	}
@@ -740,12 +1113,23 @@ func (s *SQLStore) GetMessageSecret(chat, sender types.JID, id types.MessageID) 
 }
 
 const (
-	putPrivacyTokens = `
+	sqlitePutPrivacyTokens = `
 		INSERT INTO whatsmeow_privacy_tokens (our_jid, their_jid, token, timestamp)
-		VALUES ($1, $2, $3, $4)
+		VALUES (@p1, @p2, @p3, @p4)
 		ON CONFLICT (our_jid, their_jid) DO UPDATE SET token=EXCLUDED.token, timestamp=EXCLUDED.timestamp
 	`
-	getPrivacyToken = `SELECT token, timestamp FROM whatsmeow_privacy_tokens WHERE our_jid=$1 AND their_jid=$2`
+	mssqlPutPrivacyTokens = `
+		MERGE INTO whatsmeow_privacy_tokens AS target
+		USING (VALUES (@p1, @p2, @p3, @p4)) AS source (our_jid, their_jid, token, timestamp_info)
+		ON (target.our_jid = source.our_jid AND target.their_jid = source.their_jid)
+		WHEN MATCHED THEN
+			UPDATE SET target.token = source.token, target.timestamp_info = source.timestamp_info
+		WHEN NOT MATCHED THEN
+			INSERT (our_jid, their_jid, token, timestamp_info)
+			VALUES (source.our_jid, source.their_jid, source.token, source.timestamp_info);
+	`
+	sqliteGetPrivacyToken = `SELECT token, timestamp FROM whatsmeow_privacy_tokens WHERE our_jid=@p1 AND their_jid=@p2`
+	mssqlGetPrivacyToken  = `SELECT token, timestamp_info FROM whatsmeow_privacy_tokens WITH (NOLOCK) WHERE our_jid=@p1 AND their_jid=@p2`
 )
 
 func (s *SQLStore) PutPrivacyTokens(tokens ...store.PrivacyToken) error {
@@ -756,9 +1140,16 @@ func (s *SQLStore) PutPrivacyTokens(tokens ...store.PrivacyToken) error {
 		args[i*3+1] = token.User.ToNonAD().String()
 		args[i*3+2] = token.Token
 		args[i*3+3] = token.Timestamp.Unix()
-		placeholders[i] = fmt.Sprintf("($1, $%d, $%d, $%d)", i*3+2, i*3+3, i*3+4)
+		placeholders[i] = fmt.Sprintf("(@p1, @p%d, @p%d, @p%d)", i*3+2, i*3+3, i*3+4)
 	}
-	query := strings.ReplaceAll(putPrivacyTokens, "($1, $2, $3, $4)", strings.Join(placeholders, ","))
+	var query string
+	if s.dialect == "sqlserver" {
+		query = strings.ReplaceAll(mssqlPutPrivacyTokens, "(@p1, @p2, @p3, @p4)", strings.Join(placeholders, ","))
+	} else {
+		query = strings.ReplaceAll(sqlitePutPrivacyTokens, "(@p1, @p2, @p3, @p4)", strings.Join(placeholders, ","))
+	}
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
 	_, err := s.db.Exec(query, args...)
 	return err
 }
@@ -767,7 +1158,12 @@ func (s *SQLStore) GetPrivacyToken(user types.JID) (*store.PrivacyToken, error) 
 	var token store.PrivacyToken
 	token.User = user.ToNonAD()
 	var ts int64
-	err := s.db.QueryRow(getPrivacyToken, s.JID, token.User).Scan(&token.Token, &ts)
+	var err error
+	if s.dialect == "sqlserver" {
+		err = s.db.QueryRow(mssqlGetPrivacyToken, s.JID, token.User).Scan(&token.Token, &ts)
+	} else {
+		err = s.db.QueryRow(sqliteGetPrivacyToken, s.JID, token.User).Scan(&token.Token, &ts)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	} else if err != nil {

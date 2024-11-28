@@ -32,9 +32,10 @@ type FrameSocket struct {
 	Frames       chan []byte
 	OnDisconnect func(remote bool)
 	WriteTimeout time.Duration
-
-	Header []byte
-	Dialer websocket.Dialer
+	writeMu      sync.Mutex
+	readMu       sync.Mutex
+	Header       []byte
+	Dialer       websocket.Dialer
 
 	incomingLength int
 	receivedLength int
@@ -159,7 +160,10 @@ func (fs *FrameSocket) SendFrame(data []byte) error {
 			fs.log.Warnf("Failed to set write deadline: %v", err)
 		}
 	}
-	return conn.WriteMessage(websocket.BinaryMessage, wholeFrame)
+	fs.writeMu.Lock()
+	defer fs.writeMu.Unlock()
+	err := conn.WriteMessage(websocket.BinaryMessage, wholeFrame)
+	return err
 }
 
 func (fs *FrameSocket) frameComplete() {
@@ -219,7 +223,9 @@ func (fs *FrameSocket) readPump(conn *websocket.Conn, ctx context.Context) {
 		go fs.Close(0)
 	}()
 	for {
+		fs.readMu.Lock()
 		msgType, data, err := conn.ReadMessage()
+		fs.readMu.Unlock()
 		if err != nil {
 			// Ignore the error if the context has been closed
 			if !errors.Is(ctx.Err(), context.Canceled) {

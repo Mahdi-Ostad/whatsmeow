@@ -143,19 +143,19 @@ type Device struct {
 
 	FacebookUUID uuid.UUID
 
-	Initialized   bool
-	Identities    IdentityStore
-	Sessions      SessionStore
-	PreKeys       PreKeyStore
-	SenderKeys    SenderKeyStore
-	AppStateKeys  AppStateSyncKeyStore
-	AppState      AppStateStore
-	Contacts      ContactStore
-	ChatSettings  ChatSettingsStore
-	MsgSecrets    MsgSecretStore
-	PrivacyTokens PrivacyTokenStore
-	Container     DeviceContainer
-
+	Initialized          bool
+	Identities           IdentityStore
+	Sessions             SessionStore
+	PreKeys              PreKeyStore
+	SenderKeys           SenderKeyStore
+	AppStateKeys         AppStateSyncKeyStore
+	AppState             AppStateStore
+	Contacts             ContactStore
+	ChatSettings         ChatSettingsStore
+	MsgSecrets           MsgSecretStore
+	PrivacyTokens        PrivacyTokenStore
+	Container            DeviceContainer
+	ManagerId            string
 	DatabaseErrorHandler func(device *Device, action string, attemptIndex int, err error) (retry bool)
 }
 
