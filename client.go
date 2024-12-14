@@ -170,6 +170,7 @@ type Client struct {
 	// The library is currently embedded in mautrix-meta (https://github.com/mautrix/meta), but may be separated later.
 	MessengerConfig *MessengerConfig
 	RefreshCAT      func() error
+	HasFailedLogin  bool
 }
 
 type MessengerConfig struct {

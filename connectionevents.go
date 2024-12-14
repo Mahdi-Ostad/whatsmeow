@@ -18,6 +18,7 @@ import (
 func (cli *Client) handleStreamError(node *waBinary.Node) {
 	cli.isLoggedIn.Store(false)
 	cli.clearResponseWaiters(node)
+	cli.HasFailedLogin = true
 	code, _ := node.Attrs["code"].(string)
 	conflict, _ := node.GetOptionalChildByTag("conflict")
 	conflictType := conflict.AttrGetter().OptionalString("type")
