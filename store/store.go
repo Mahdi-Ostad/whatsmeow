@@ -156,6 +156,7 @@ type Device struct {
 	PrivacyTokens        PrivacyTokenStore
 	Container            DeviceContainer
 	ManagerId            string
+	LockTime             int64
 	DatabaseErrorHandler func(device *Device, action string, attemptIndex int, err error) (retry bool)
 }
 

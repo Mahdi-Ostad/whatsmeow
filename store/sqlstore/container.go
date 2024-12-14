@@ -12,6 +12,7 @@ import (
 	"fmt"
 	mathRand "math/rand"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"go.mau.fi/util/random"
@@ -100,10 +101,23 @@ SELECT jid, registration_id, noise_key, identity_key,
 FROM whatsmeow_device
 `
 
+const lockDeviceByManagerId = `UPDATE whatsmeow_device SET locktime = @p1 WHERE manager_id = @p2 AND locktime<@p3`
+
+const unlockDeviceByManagerId = `UPDATE whatsmeow_device SET locktime = 0 WHERE manager_id = @p1`
+
+const checkActiveDeviceManagerId = `SELECT 1 FROM whatsmeow_device WHERE manager_id = @p1 AND locktime >= @p2`
+
 const getDeviceByManagerId = `SELECT jid, registration_id, noise_key, identity_key,
 signed_pre_key, signed_pre_key_id, signed_pre_key_sig,
 adv_key, adv_details, adv_account_sig, adv_account_sig_key, adv_device_sig,
-platform, business_name, push_name, facebook_uuid, manager_id
+platform, business_name, push_name, facebook_uuid, manager_id, locktime
+FROM whatsmeow_device
+WHERE manager_id = @p1 AND locktime = @p2`
+
+const getDeviceByManagerIdNoLock = `SELECT jid, registration_id, noise_key, identity_key,
+signed_pre_key, signed_pre_key_id, signed_pre_key_sig,
+adv_key, adv_details, adv_account_sig, adv_account_sig_key, adv_device_sig,
+platform, business_name, push_name, facebook_uuid, manager_id, locktime
 FROM whatsmeow_device
 WHERE manager_id = @p1`
 
@@ -153,7 +167,7 @@ func (c *Container) scanDevice(row scannable) (*store.Device, error) {
 		&device.ID, &device.RegistrationID, &noisePriv, &identityPriv,
 		&preKeyPriv, &device.SignedPreKey.KeyID, &preKeySig,
 		&device.AdvSecretKey, &account.Details, &account.AccountSignature, &account.AccountSignatureKey, &account.DeviceSignature,
-		&device.Platform, &device.BusinessName, &device.PushName, &fbUUID, &device.ManagerId)
+		&device.Platform, &device.BusinessName, &device.PushName, &fbUUID, &device.ManagerId, &device.LockTime)
 	if err != nil {
 		return nil, fmt.Errorf("failed to scan session: %w", err)
 	} else if len(noisePriv) != 32 || len(identityPriv) != 32 || len(preKeyPriv) != 32 || len(preKeySig) != 64 {
@@ -218,7 +232,13 @@ func (c *Container) GetFirstDevice(managerId string) (*store.Device, error) {
 }
 
 func (c *Container) GetAllManagerDevice(managerId string) ([]*store.Device, error) {
-	rows, err := c.db.Query(getDeviceByManagerId, managerId)
+	dt := time.Now().UnixMilli()
+	mintime := time.Now().Add(-5 * time.Minute).UnixMilli()
+	_, err := c.db.Exec(lockDeviceByManagerId, dt, managerId, mintime)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := c.db.Query(getDeviceByManagerId, managerId, dt)
 	if err != nil {
 		return nil, err
 	}
@@ -232,6 +252,28 @@ func (c *Container) GetAllManagerDevice(managerId string) ([]*store.Device, erro
 		devices = append(devices, device)
 	}
 	return devices, nil
+}
+
+func (c *Container) GetAllManagerDeviceWithoutLock(managerId string) ([]*store.Device, error) {
+	rows, err := c.db.Query(getDeviceByManagerIdNoLock, managerId)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var devices []*store.Device
+	for rows.Next() {
+		device, err := c.scanDevice(rows)
+		if err != nil {
+			return nil, err
+		}
+		devices = append(devices, device)
+	}
+	return devices, nil
+}
+
+func (c *Container) UnlockManagerDevice(managerId string) error {
+	_, err := c.db.Exec(unlockDeviceByManagerId, managerId)
+	return err
 }
 
 // GetDevice finds the device with the specified JID in the database.
