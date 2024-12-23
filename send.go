@@ -1018,6 +1018,14 @@ func (cli *Client) encryptMessageForDevices(ctx context.Context, allDevices []ty
 	includeIdentity := false
 	participantNodes := make([]waBinary.Node, 0, len(allDevices))
 	var retryDevices []types.JID
+	var addresses []string
+	for _, jid := range allDevices {
+		addresses = append(addresses, jid.SignalAddress().String())
+	}
+	cli.Store.SessionsCache = cli.Store.PrekeysCache.CacheSessions(addresses)
+	cli.Store.IdentityCache = cli.Store.PrekeysCache.CacheIdentities(addresses)
+	defer clear(cli.Store.SessionsCache)
+	defer clear(cli.Store.IdentityCache)
 	for _, jid := range allDevices {
 		plaintext := msgPlaintext
 		if jid.User == ownID.User && dsmPlaintext != nil {

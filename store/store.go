@@ -126,6 +126,11 @@ type PrivacyTokenStore interface {
 	GetPrivacyToken(user types.JID) (*PrivacyToken, error)
 }
 
+type PrekeysCacheStore interface {
+	CacheSessions(addresses []string) map[string][]byte
+	CacheIdentities(addresses []string) map[string][32]byte
+}
+
 type Device struct {
 	Log waLog.Logger
 
@@ -154,9 +159,12 @@ type Device struct {
 	ChatSettings         ChatSettingsStore
 	MsgSecrets           MsgSecretStore
 	PrivacyTokens        PrivacyTokenStore
+	PrekeysCache         PrekeysCacheStore
 	Container            DeviceContainer
 	ManagerId            string
 	LockTime             int64
+	SessionsCache        map[string][]byte
+	IdentityCache        map[string][32]byte
 	DatabaseErrorHandler func(device *Device, action string, attemptIndex int, err error) (retry bool)
 }
 

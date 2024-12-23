@@ -34,6 +34,9 @@ func (device *Device) GetLocalRegistrationId() uint32 {
 }
 
 func (device *Device) SaveIdentity(address *protocol.SignalAddress, identityKey *identity.Key) {
+	if device.IdentityCache != nil && len(device.IdentityCache) > 0 {
+		device.IdentityCache[address.String()] = identityKey.PublicKey().PublicKey()
+	}
 	for i := 0; ; i++ {
 		err := device.Identities.PutIdentity(address.String(), identityKey.PublicKey().PublicKey())
 		if err == nil || !device.handleDatabaseError(i, err, "save identity of %s", address.String()) {
@@ -43,6 +46,12 @@ func (device *Device) SaveIdentity(address *protocol.SignalAddress, identityKey 
 }
 
 func (device *Device) IsTrustedIdentity(address *protocol.SignalAddress, identityKey *identity.Key) bool {
+	if device.IdentityCache != nil && len(device.IdentityCache) > 0 {
+		if cache, ok := device.IdentityCache[address.String()]; ok {
+			return cache == identityKey.PublicKey().PublicKey()
+		}
+		return true
+	}
 	for i := 0; ; i++ {
 		isTrusted, err := device.Identities.IsTrustedIdentity(address.String(), identityKey.PublicKey().PublicKey())
 		if err == nil || !device.handleDatabaseError(i, err, "check if %s's identity is trusted", address.String()) {
@@ -87,6 +96,17 @@ func (device *Device) ContainsPreKey(preKeyID uint32) bool {
 }
 
 func (device *Device) LoadSession(address *protocol.SignalAddress) *record.Session {
+	if device.SessionsCache != nil && len(device.SessionsCache) > 0 {
+		if rawSess, ok := device.SessionsCache[address.String()]; ok {
+			sess, err := record.NewSessionFromBytes(rawSess, SignalProtobufSerializer.Session, SignalProtobufSerializer.State)
+			if err != nil {
+				device.Log.Errorf("Failed to deserialize session with %s: %v", address.String(), err)
+				return record.NewSession(SignalProtobufSerializer.Session, SignalProtobufSerializer.State)
+			}
+			return sess
+		}
+		return record.NewSession(SignalProtobufSerializer.Session, SignalProtobufSerializer.State)
+	}
 	var rawSess []byte
 	for i := 0; ; i++ {
 		var err error
@@ -111,6 +131,9 @@ func (device *Device) GetSubDeviceSessions(name string) []uint32 {
 }
 
 func (device *Device) StoreSession(address *protocol.SignalAddress, record *record.Session) {
+	if device.SessionsCache != nil && len(device.SessionsCache) > 0 {
+		device.SessionsCache[address.String()] = record.Serialize()
+	}
 	for i := 0; ; i++ {
 		err := device.Sessions.PutSession(address.String(), record.Serialize())
 		if err == nil || !device.handleDatabaseError(i, err, "store session with %s", address.String()) {
@@ -120,6 +143,12 @@ func (device *Device) StoreSession(address *protocol.SignalAddress, record *reco
 }
 
 func (device *Device) ContainsSession(remoteAddress *protocol.SignalAddress) bool {
+	if device.SessionsCache != nil && len(device.SessionsCache) > 0 {
+		if _, ok := device.SessionsCache[remoteAddress.String()]; ok {
+			return true
+		}
+		return false
+	}
 	for i := 0; ; i++ {
 		hasSession, err := device.Sessions.HasSession(remoteAddress.String())
 		if err == nil || !device.handleDatabaseError(i, err, "store has session for %s", remoteAddress.String()) {

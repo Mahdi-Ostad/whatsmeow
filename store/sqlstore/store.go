@@ -63,13 +63,19 @@ type sessionUpdate struct {
 	sqlStore *SQLStore
 	address  string
 	session  []byte
-	err      chan<- error
+}
+
+type identityUpdate struct {
+	sqlStore *SQLStore
+	address  string
+	key      [32]byte
 }
 
 var sqlInstance *sql.DB
 var contactsChannel = make(chan contactUpdate)
 var senderkeysChannel = make(chan senderkeyUpdate)
 var sessionsChannel = make(chan sessionUpdate)
+var identitiesChannel = make(chan identityUpdate)
 
 // NewSQLStore creates a new SQLStore with the given database container and user JID.
 // It contains implementations of all the different stores in the store package.
@@ -142,6 +148,26 @@ func ManageSenderKeys() {
 	}
 }
 
+func ManageIdentities() {
+	for update := range identitiesChannel {
+		err := manageSingleIdentity(update)
+		if err != nil {
+			update.sqlStore.log.Errorf(err.Error())
+		}
+	}
+}
+
+func manageSingleIdentity(identityUpdate identityUpdate) error {
+	identityUpdate.sqlStore.mutex.Lock()
+	defer identityUpdate.sqlStore.mutex.Unlock()
+	if identityUpdate.sqlStore.dialect == "sqlserver" {
+		_, err := identityUpdate.sqlStore.db.Exec(mssqlPutIdentityQuery, identityUpdate.sqlStore.JID, identityUpdate.address, identityUpdate.key[:])
+		return err
+	}
+	_, err := identityUpdate.sqlStore.db.Exec(sqlitePutIdentityQuery, identityUpdate.sqlStore.JID, identityUpdate.address, identityUpdate.key[:])
+	return err
+}
+
 func manageSingleSenderKey(senderkeyUpdate senderkeyUpdate) error {
 	senderkeyUpdate.sqlStore.mutex.Lock()
 	defer senderkeyUpdate.sqlStore.mutex.Unlock()
@@ -156,7 +182,9 @@ func manageSingleSenderKey(senderkeyUpdate senderkeyUpdate) error {
 func ManageSessions() {
 	for update := range sessionsChannel {
 		err := manageSingleSession(update)
-		update.err <- err
+		if err != nil {
+			update.sqlStore.log.Errorf(err.Error())
+		}
 	}
 }
 
@@ -202,14 +230,12 @@ const (
 )
 
 func (s *SQLStore) PutIdentity(address string, key [32]byte) error {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-	if s.dialect == "sqlserver" {
-		_, err := s.db.Exec(mssqlPutIdentityQuery, s.JID, address, key[:])
-		return err
+	identitiesChannel <- identityUpdate{
+		sqlStore: s,
+		address:  address,
+		key:      key,
 	}
-	_, err := s.db.Exec(sqlitePutIdentityQuery, s.JID, address, key[:])
-	return err
+	return nil
 }
 
 func (s *SQLStore) DeleteAllIdentities(phone string) error {
@@ -291,16 +317,16 @@ func (s *SQLStore) HasSession(address string) (has bool, err error) {
 }
 
 func (s *SQLStore) PutSession(address string, session []byte) error {
-	res := make(chan error, 1)
+	//res := make(chan error, 1)
 	sessionsChannel <- sessionUpdate{
 		address:  address,
 		session:  session,
 		sqlStore: s,
-		err:      res,
+		//	err:      res,
 	}
-	for err := range res {
-		return err
-	}
+	// for err := range res {
+	// 	return err
+	// }
 	return nil
 }
 
@@ -1172,4 +1198,63 @@ func (s *SQLStore) GetPrivacyToken(user types.JID) (*store.PrivacyToken, error) 
 		token.Timestamp = time.Unix(ts, 0)
 		return &token, nil
 	}
+}
+
+const (
+	getCacheSessionQuery  = `SELECT their_id, session FROM whatsmeow_sessions WITH (NOLOCK) WHERE our_jid=@p1 AND their_id IN `
+	getCacheIdentityQuery = `SELECT their_id, identity_info FROM whatsmeow_identity_keys WITH (NOLOCK) WHERE our_jid=@p1 AND their_id IN `
+)
+
+func (s *SQLStore) CacheSessions(addresses []string) (final map[string][]byte) {
+	query := getCacheSessionQuery + "("
+	queryParams := make([]interface{}, len(addresses)+1)
+	queryParams[0] = s.JID
+	final = make(map[string][]byte)
+	for index, address := range addresses {
+		if index > 0 {
+			query += ","
+		}
+		query += fmt.Sprintf("@p%d", index+2)
+		queryParams[index+1] = address
+	}
+	query += ")"
+	rows, err := s.db.Query(query, queryParams...)
+	if err != nil {
+		s.log.Errorf(err.Error())
+		return
+	}
+	for rows.Next() {
+		var session []byte
+		var id string
+		rows.Scan(&id, &session)
+		final[id] = session
+	}
+	return
+}
+
+func (s *SQLStore) CacheIdentities(addresses []string) (final map[string][32]byte) {
+	query := getCacheIdentityQuery + "("
+	queryParams := make([]interface{}, len(addresses)+1)
+	queryParams[0] = s.JID
+	final = make(map[string][32]byte)
+	for index, address := range addresses {
+		if index > 0 {
+			query += ","
+		}
+		query += fmt.Sprintf("@p%d", index+2)
+		queryParams[index+1] = address
+	}
+	query += ")"
+	rows, err := s.db.Query(query, queryParams...)
+	if err != nil {
+		s.log.Errorf(err.Error())
+		return
+	}
+	for rows.Next() {
+		var session []byte
+		var id string
+		rows.Scan(&id, &session)
+		final[id] = *(*[32]byte)(session)
+	}
+	return
 }
