@@ -60,15 +60,15 @@ type senderkeyUpdate struct {
 }
 
 type sessionUpdate struct {
-	sqlStore *SQLStore
-	address  string
-	session  []byte
+	address string
+	session []byte
+	jid     string
 }
 
 type identityUpdate struct {
-	sqlStore *SQLStore
-	address  string
-	key      [32]byte
+	address string
+	key     [32]byte
+	jid     string
 }
 
 var sqlInstance *sql.DB
@@ -76,6 +76,9 @@ var contactsChannel = make(chan contactUpdate)
 var senderkeysChannel = make(chan senderkeyUpdate)
 var sessionsChannel = make(chan sessionUpdate)
 var identitiesChannel = make(chan identityUpdate)
+
+var identityList = []identityUpdate{}
+var sessionList = []sessionUpdate{}
 
 // NewSQLStore creates a new SQLStore with the given database container and user JID.
 // It contains implementations of all the different stores in the store package.
@@ -148,23 +151,44 @@ func ManageSenderKeys() {
 	}
 }
 
-func ManageIdentities() {
+func ManageIdentities(logger waLog.Logger) {
+	go identityUpdateBackgroundService(logger)
 	for update := range identitiesChannel {
-		err := manageSingleIdentity(update)
-		if err != nil {
-			update.sqlStore.log.Errorf(err.Error())
+		identityList = append(identityList, update)
+	}
+}
+
+func identityUpdateBackgroundService(logger waLog.Logger) {
+	for {
+		time.Sleep(time.Minute * 1)
+		if len(identityList) == 0 {
+			logger.Infof("No Identity to Update")
+			continue
 		}
+		logger.Infof("Storing Identities Starting")
+		identities := make([]identityUpdate, len(identityList))
+		copy(identities, identityList)
+		identityList = []identityUpdate{}
+		for _, update := range identities {
+			err := manageSingleIdentity(update)
+			if err != nil {
+				logger.Errorf(err.Error())
+			}
+		}
+		logger.Infof("Storing Identities Complete")
 	}
 }
 
 func manageSingleIdentity(identityUpdate identityUpdate) error {
-	identityUpdate.sqlStore.mutex.Lock()
-	defer identityUpdate.sqlStore.mutex.Unlock()
-	if identityUpdate.sqlStore.dialect == "sqlserver" {
-		_, err := identityUpdate.sqlStore.db.Exec(mssqlPutIdentityQuery, identityUpdate.sqlStore.JID, identityUpdate.address, identityUpdate.key[:])
-		return err
-	}
-	_, err := identityUpdate.sqlStore.db.Exec(sqlitePutIdentityQuery, identityUpdate.sqlStore.JID, identityUpdate.address, identityUpdate.key[:])
+	// sqlInstance.mutex.Lock()
+	// defer identityUpdate.sqlStore.mutex.Unlock()
+	// if identityUpdate.sqlStore.dialect == "sqlserver" {
+	// 	_, err := identityUpdate.sqlStore.db.Exec(mssqlPutIdentityQuery, identityUpdate.sqlStore.JID, identityUpdate.address, identityUpdate.key[:])
+	// 	return err
+	// }
+	// _, err := identityUpdate.sqlStore.db.Exec(sqlitePutIdentityQuery, identityUpdate.sqlStore.JID, identityUpdate.address, identityUpdate.key[:])
+	// return err
+	_, err := sqlInstance.Exec(mssqlPutIdentityQuery, identityUpdate.jid, identityUpdate.address, identityUpdate.key[:])
 	return err
 }
 
@@ -179,24 +203,45 @@ func manageSingleSenderKey(senderkeyUpdate senderkeyUpdate) error {
 	return err
 }
 
-func ManageSessions() {
+func ManageSessions(logger waLog.Logger) {
+	go sessionUpdateBackgroundService(logger)
 	for update := range sessionsChannel {
-		err := manageSingleSession(update)
-		if err != nil {
-			update.sqlStore.log.Errorf(err.Error())
+		sessionList = append(sessionList, update)
+	}
+}
+
+func sessionUpdateBackgroundService(logger waLog.Logger) {
+	for {
+		time.Sleep(time.Minute * 1)
+		if len(sessionList) == 0 {
+			logger.Infof("No Session to Update")
+			continue
 		}
+		logger.Infof("Storing Sessions Starting")
+		sessions := make([]sessionUpdate, len(sessionList))
+		copy(sessions, sessionList)
+		sessionList = []sessionUpdate{}
+		for _, update := range sessions {
+			err := manageSingleSession(update)
+			if err != nil {
+				logger.Errorf(err.Error())
+			}
+		}
+		logger.Infof("Storing Sessions Complete")
 	}
 }
 
 func manageSingleSession(sessionUpdate sessionUpdate) error {
-	sessionUpdate.sqlStore.mutex.Lock()
-	defer sessionUpdate.sqlStore.mutex.Unlock()
-	var err error
-	if sessionUpdate.sqlStore.dialect == "sqlserver" {
-		_, err = sessionUpdate.sqlStore.db.Exec(mssqlPutSessionQuery, sessionUpdate.sqlStore.JID, sessionUpdate.address, sessionUpdate.session)
-	} else {
-		_, err = sessionUpdate.sqlStore.db.Exec(sqlitePutSessionQuery, sessionUpdate.sqlStore.JID, sessionUpdate.address, sessionUpdate.session)
-	}
+	// sessionUpdate.sqlStore.mutex.Lock()
+	// defer sessionUpdate.sqlStore.mutex.Unlock()
+	// var err error
+	// if sessionUpdate.sqlStore.dialect == "sqlserver" {
+	// 	_, err = sessionUpdate.sqlStore.db.Exec(mssqlPutSessionQuery, sessionUpdate.sqlStore.JID, sessionUpdate.address, sessionUpdate.session)
+	// } else {
+	// 	_, err = sessionUpdate.sqlStore.db.Exec(sqlitePutSessionQuery, sessionUpdate.sqlStore.JID, sessionUpdate.address, sessionUpdate.session)
+	// }
+	// return err
+	_, err := sqlInstance.Exec(mssqlPutSessionQuery, sessionUpdate.jid, sessionUpdate.address, sessionUpdate.session)
 	return err
 }
 
@@ -231,9 +276,9 @@ const (
 
 func (s *SQLStore) PutIdentity(address string, key [32]byte) error {
 	identitiesChannel <- identityUpdate{
-		sqlStore: s,
-		address:  address,
-		key:      key,
+		address: address,
+		key:     key,
+		jid:     s.JID,
 	}
 	return nil
 }
@@ -319,9 +364,9 @@ func (s *SQLStore) HasSession(address string) (has bool, err error) {
 func (s *SQLStore) PutSession(address string, session []byte) error {
 	//res := make(chan error, 1)
 	sessionsChannel <- sessionUpdate{
-		address:  address,
-		session:  session,
-		sqlStore: s,
+		address: address,
+		session: session,
+		jid:     s.JID,
 		//	err:      res,
 	}
 	// for err := range res {

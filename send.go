@@ -1024,8 +1024,6 @@ func (cli *Client) encryptMessageForDevices(ctx context.Context, allDevices []ty
 	}
 	cli.Store.SessionsCache = cli.Store.PrekeysCache.CacheSessions(addresses)
 	cli.Store.IdentityCache = cli.Store.PrekeysCache.CacheIdentities(addresses)
-	defer clear(cli.Store.SessionsCache)
-	defer clear(cli.Store.IdentityCache)
 	for _, jid := range allDevices {
 		plaintext := msgPlaintext
 		if jid.User == ownID.User && dsmPlaintext != nil {
@@ -1075,6 +1073,8 @@ func (cli *Client) encryptMessageForDevices(ctx context.Context, allDevices []ty
 			}
 		}
 	}
+	clear(cli.Store.SessionsCache)
+	clear(cli.Store.IdentityCache)
 	return participantNodes, includeIdentity
 }
 
