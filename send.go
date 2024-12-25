@@ -1047,6 +1047,8 @@ func (cli *Client) encryptMessageForDevices(ctx context.Context, allDevices []ty
 		}
 	}
 	if len(retryDevices) > 0 {
+		cli.Store.SessionsCache[ownID.SignalAddress().String()] = []byte{}
+		cli.Store.IdentityCache[ownID.SignalAddress().String()] = [32]byte{}
 		bundles, err := cli.fetchPreKeys(ctx, retryDevices)
 		if err != nil {
 			cli.Log.Warnf("Failed to fetch prekeys for %v to retry encryption: %v", retryDevices, err)
