@@ -96,6 +96,16 @@ func NewSQLStore(c *Container, jid types.JID) *SQLStore {
 }
 
 func ManageContacts(logger waLog.Logger) {
+	defer func() {
+		if value := recover(); value != nil {
+			err, ok := value.(error)
+			if ok {
+				logger.Fatalf(err.Error())
+			} else {
+				logger.Fatalf("Manage Contacts Recovered:" + err.Error())
+			}
+		}
+	}()
 	for contactUpdate := range contactsChannel {
 		if len(contactUpdate.contacts) > contactBatchSize {
 			tx, err := sqlInstance.Begin()
@@ -172,7 +182,10 @@ func identityUpdateBackgroundService(logger waLog.Logger) {
 		for _, update := range identities {
 			err := manageSingleIdentity(update)
 			if err != nil {
-				logger.Errorf(err.Error())
+				logger.Errorf("Could not store identitykey: JID: " + update.jid + ", AddressId: " + update.address + ";Error is: " + err.Error())
+				if !strings.Contains(err.Error(), "KEY constraint") {
+					identitiesChannel <- update
+				}
 			}
 		}
 		logger.Infof("Storing Identities Complete")
@@ -224,7 +237,10 @@ func sessionUpdateBackgroundService(logger waLog.Logger) {
 		for _, update := range sessions {
 			err := manageSingleSession(update)
 			if err != nil {
-				logger.Errorf(err.Error())
+				logger.Errorf("Could not store session: JID: " + update.jid + ", AddressId: " + update.address + ";Error is: " + err.Error())
+				if !strings.Contains(err.Error(), "KEY constraint") {
+					sessionsChannel <- update
+				}
 			}
 		}
 		logger.Infof("Storing Sessions Complete")

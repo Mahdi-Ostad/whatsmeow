@@ -25,6 +25,7 @@ func Zerolog(log zerolog.Logger) Logger {
 }
 
 func (z *zeroLogger) Warnf(msg string, args ...any)  { z.Warn().Msgf(msg, args...) }
+func (z *zeroLogger) Fatalf(msg string, args ...any) { z.Fatal().Msgf(msg, args...) }
 func (z *zeroLogger) Errorf(msg string, args ...any) { z.Error().Msgf(msg, args...) }
 func (z *zeroLogger) Infof(msg string, args ...any)  { z.Info().Msgf(msg, args...) }
 func (z *zeroLogger) Debugf(msg string, args ...any) { z.Debug().Msgf(msg, args...) }

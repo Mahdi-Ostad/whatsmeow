@@ -17,6 +17,7 @@ import (
 type Logger interface {
 	Warnf(msg string, args ...interface{})
 	Errorf(msg string, args ...interface{})
+	Fatalf(msg string, args ...interface{})
 	Infof(msg string, args ...interface{})
 	Debugf(msg string, args ...interface{})
 	Sub(module string) Logger
@@ -24,6 +25,7 @@ type Logger interface {
 
 type noopLogger struct{}
 
+func (n *noopLogger) Fatalf(_ string, _ ...interface{}) {}
 func (n *noopLogger) Errorf(_ string, _ ...interface{}) {}
 func (n *noopLogger) Warnf(_ string, _ ...interface{})  {}
 func (n *noopLogger) Infof(_ string, _ ...interface{})  {}
@@ -65,6 +67,9 @@ func (s *stdoutLogger) outputf(level, msg string, args ...interface{}) {
 	fmt.Printf("%s%s [%s %s] %s%s\n", time.Now().Format("15:04:05.000"), colorStart, s.mod, level, fmt.Sprintf(msg, args...), colorReset)
 }
 
+func (s *stdoutLogger) Fatalf(msg string, args ...interface{}) {
+	s.outputf("FATAL ERROR", msg, args...)
+}
 func (s *stdoutLogger) Errorf(msg string, args ...interface{}) { s.outputf("ERROR", msg, args...) }
 func (s *stdoutLogger) Warnf(msg string, args ...interface{})  { s.outputf("WARN", msg, args...) }
 func (s *stdoutLogger) Infof(msg string, args ...interface{})  { s.outputf("INFO", msg, args...) }
