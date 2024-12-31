@@ -1046,6 +1046,14 @@ func (cli *Client) encryptMessageForDevices(ctx context.Context, allDevices []ty
 			includeIdentity = true
 		}
 	}
+	oldSessions := make([]string, len(cli.Store.SessionsCache))
+	oldIdentityKeys := make([]string, len(cli.Store.IdentityCache))
+	for key, _ := range cli.Store.SessionsCache {
+		oldSessions = append(oldSessions, key)
+	}
+	for key, _ := range cli.Store.IdentityCache {
+		oldIdentityKeys = append(oldIdentityKeys, key)
+	}
 	if len(retryDevices) > 0 {
 		cli.Store.SessionsCache[ownID.SignalAddress().String()] = []byte{}
 		cli.Store.IdentityCache[ownID.SignalAddress().String()] = [32]byte{}
@@ -1074,9 +1082,19 @@ func (cli *Client) encryptMessageForDevices(ctx context.Context, allDevices []ty
 				}
 			}
 		}
+		delete(cli.Store.SessionsCache, ownID.SignalAddress().String())
+		delete(cli.Store.IdentityCache, ownID.SignalAddress().String())
+	}
+	if len(cli.Store.IdentityCache) > 0 {
+		cli.Store.PrekeysCache.StoreIdentities(cli.Store.IdentityCache, oldIdentityKeys)
+	}
+	if len(cli.Store.SessionsCache) > 0 {
+		cli.Store.PrekeysCache.StoreSessions(cli.Store.SessionsCache, oldSessions)
 	}
 	clear(cli.Store.SessionsCache)
 	clear(cli.Store.IdentityCache)
+	oldSessions = make([]string, 0)
+	oldIdentityKeys = make([]string, 0)
 	return participantNodes, includeIdentity
 }
 

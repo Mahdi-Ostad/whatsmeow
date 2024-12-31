@@ -36,6 +36,7 @@ func (device *Device) GetLocalRegistrationId() uint32 {
 func (device *Device) SaveIdentity(address *protocol.SignalAddress, identityKey *identity.Key) {
 	if device.IdentityCache != nil && len(device.IdentityCache) > 0 {
 		device.IdentityCache[address.String()] = identityKey.PublicKey().PublicKey()
+		return
 	}
 	for i := 0; ; i++ {
 		err := device.Identities.PutIdentity(address.String(), identityKey.PublicKey().PublicKey())
@@ -133,6 +134,7 @@ func (device *Device) GetSubDeviceSessions(name string) []uint32 {
 func (device *Device) StoreSession(address *protocol.SignalAddress, record *record.Session) {
 	if device.SessionsCache != nil && len(device.SessionsCache) > 0 {
 		device.SessionsCache[address.String()] = record.Serialize()
+		return
 	}
 	for i := 0; ; i++ {
 		err := device.Sessions.PutSession(address.String(), record.Serialize())

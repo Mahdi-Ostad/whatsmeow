@@ -129,6 +129,8 @@ type PrivacyTokenStore interface {
 type PrekeysCacheStore interface {
 	CacheSessions(addresses []string) map[string][]byte
 	CacheIdentities(addresses []string) map[string][32]byte
+	StoreSessions(sessions map[string][]byte, oldAddresses []string)
+	StoreIdentities(identityKeys map[string][32]byte, oldAddresses []string)
 }
 
 type Device struct {

@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	mssql "github.com/denisenkom/go-mssqldb"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/util/keys"
@@ -74,11 +75,6 @@ type identityUpdate struct {
 var sqlInstance *sql.DB
 var contactsChannel = make(chan contactUpdate)
 var senderkeysChannel = make(chan senderkeyUpdate)
-var sessionsChannel = make(chan sessionUpdate)
-var identitiesChannel = make(chan identityUpdate)
-
-var identityList = []identityUpdate{}
-var sessionList = []sessionUpdate{}
 
 // NewSQLStore creates a new SQLStore with the given database container and user JID.
 // It contains implementations of all the different stores in the store package.
@@ -161,50 +157,6 @@ func ManageSenderKeys() {
 	}
 }
 
-func ManageIdentities(logger waLog.Logger) {
-	go identityUpdateBackgroundService(logger)
-	for update := range identitiesChannel {
-		identityList = append(identityList, update)
-	}
-}
-
-func identityUpdateBackgroundService(logger waLog.Logger) {
-	for {
-		time.Sleep(time.Minute * 1)
-		if len(identityList) == 0 {
-			logger.Infof("No Identity to Update")
-			continue
-		}
-		logger.Infof("Storing Identities Starting")
-		identities := make([]identityUpdate, len(identityList))
-		copy(identities, identityList)
-		identityList = []identityUpdate{}
-		for _, update := range identities {
-			err := manageSingleIdentity(update)
-			if err != nil {
-				logger.Errorf("Could not store identitykey: JID: " + update.jid + ", AddressId: " + update.address + ";Error is: " + err.Error())
-				if !strings.Contains(err.Error(), "KEY constraint") {
-					identitiesChannel <- update
-				}
-			}
-		}
-		logger.Infof("Storing Identities Complete")
-	}
-}
-
-func manageSingleIdentity(identityUpdate identityUpdate) error {
-	// sqlInstance.mutex.Lock()
-	// defer identityUpdate.sqlStore.mutex.Unlock()
-	// if identityUpdate.sqlStore.dialect == "sqlserver" {
-	// 	_, err := identityUpdate.sqlStore.db.Exec(mssqlPutIdentityQuery, identityUpdate.sqlStore.JID, identityUpdate.address, identityUpdate.key[:])
-	// 	return err
-	// }
-	// _, err := identityUpdate.sqlStore.db.Exec(sqlitePutIdentityQuery, identityUpdate.sqlStore.JID, identityUpdate.address, identityUpdate.key[:])
-	// return err
-	_, err := sqlInstance.Exec(mssqlPutIdentityQuery, identityUpdate.jid, identityUpdate.address, identityUpdate.key[:])
-	return err
-}
-
 func manageSingleSenderKey(senderkeyUpdate senderkeyUpdate) error {
 	senderkeyUpdate.sqlStore.mutex.Lock()
 	defer senderkeyUpdate.sqlStore.mutex.Unlock()
@@ -213,51 +165,6 @@ func manageSingleSenderKey(senderkeyUpdate senderkeyUpdate) error {
 		return err
 	}
 	_, err := senderkeyUpdate.sqlStore.db.Exec(sqlitePutSenderKeyQuery, senderkeyUpdate.sqlStore.JID, senderkeyUpdate.group, senderkeyUpdate.user, senderkeyUpdate.session)
-	return err
-}
-
-func ManageSessions(logger waLog.Logger) {
-	go sessionUpdateBackgroundService(logger)
-	for update := range sessionsChannel {
-		sessionList = append(sessionList, update)
-	}
-}
-
-func sessionUpdateBackgroundService(logger waLog.Logger) {
-	for {
-		time.Sleep(time.Minute * 1)
-		if len(sessionList) == 0 {
-			logger.Infof("No Session to Update")
-			continue
-		}
-		logger.Infof("Storing Sessions Starting")
-		sessions := make([]sessionUpdate, len(sessionList))
-		copy(sessions, sessionList)
-		sessionList = []sessionUpdate{}
-		for _, update := range sessions {
-			err := manageSingleSession(update)
-			if err != nil {
-				logger.Errorf("Could not store session: JID: " + update.jid + ", AddressId: " + update.address + ";Error is: " + err.Error())
-				if !strings.Contains(err.Error(), "KEY constraint") {
-					sessionsChannel <- update
-				}
-			}
-		}
-		logger.Infof("Storing Sessions Complete")
-	}
-}
-
-func manageSingleSession(sessionUpdate sessionUpdate) error {
-	// sessionUpdate.sqlStore.mutex.Lock()
-	// defer sessionUpdate.sqlStore.mutex.Unlock()
-	// var err error
-	// if sessionUpdate.sqlStore.dialect == "sqlserver" {
-	// 	_, err = sessionUpdate.sqlStore.db.Exec(mssqlPutSessionQuery, sessionUpdate.sqlStore.JID, sessionUpdate.address, sessionUpdate.session)
-	// } else {
-	// 	_, err = sessionUpdate.sqlStore.db.Exec(sqlitePutSessionQuery, sessionUpdate.sqlStore.JID, sessionUpdate.address, sessionUpdate.session)
-	// }
-	// return err
-	_, err := sqlInstance.Exec(mssqlPutSessionQuery, sessionUpdate.jid, sessionUpdate.address, sessionUpdate.session)
 	return err
 }
 
@@ -291,12 +198,14 @@ const (
 )
 
 func (s *SQLStore) PutIdentity(address string, key [32]byte) error {
-	identitiesChannel <- identityUpdate{
-		address: address,
-		key:     key,
-		jid:     s.JID,
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	if s.dialect == "sqlserver" {
+		_, err := s.db.Exec(mssqlPutIdentityQuery, s.JID, address, key[:])
+		return err
 	}
-	return nil
+	_, err := s.db.Exec(sqlitePutIdentityQuery, s.JID, address, key[:])
+	return err
 }
 
 func (s *SQLStore) DeleteAllIdentities(phone string) error {
@@ -378,17 +287,15 @@ func (s *SQLStore) HasSession(address string) (has bool, err error) {
 }
 
 func (s *SQLStore) PutSession(address string, session []byte) error {
-	//res := make(chan error, 1)
-	sessionsChannel <- sessionUpdate{
-		address: address,
-		session: session,
-		jid:     s.JID,
-		//	err:      res,
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	var err error
+	if s.dialect == "sqlserver" {
+		_, err = s.db.Exec(mssqlPutSessionQuery, s.JID, address, session)
+	} else {
+		_, err = s.db.Exec(sqlitePutSessionQuery, s.JID, address, session)
 	}
-	// for err := range res {
-	// 	return err
-	// }
-	return nil
+	return err
 }
 
 func (s *SQLStore) DeleteAllSessions(phone string) error {
@@ -1262,8 +1169,10 @@ func (s *SQLStore) GetPrivacyToken(user types.JID) (*store.PrivacyToken, error) 
 }
 
 const (
-	getCacheSessionQuery  = `SELECT their_id, session FROM whatsmeow_sessions WITH (NOLOCK) WHERE our_jid=@p1 AND their_id IN `
-	getCacheIdentityQuery = `SELECT their_id, identity_info FROM whatsmeow_identity_keys WITH (NOLOCK) WHERE our_jid=@p1 AND their_id IN `
+	getCacheSessionQuery    = `SELECT their_id, session FROM whatsmeow_sessions WITH (NOLOCK) WHERE our_jid=@p1 AND their_id IN `
+	getCacheIdentityQuery   = `SELECT their_id, identity_info FROM whatsmeow_identity_keys WITH (NOLOCK) WHERE our_jid=@p1 AND their_id IN `
+	removeSessionsQuery     = `DELETE FROM whatsmeow_sessions WHERE our_jid=@p1 AND their_id IN `
+	removeIdentityKeysQuery = `DELETE FROM whatsmeow_identity_keys WHERE our_jid=@p1 AND their_id IN `
 )
 
 func (s *SQLStore) CacheSessions(addresses []string) (final map[string][]byte) {
@@ -1318,4 +1227,64 @@ func (s *SQLStore) CacheIdentities(addresses []string) (final map[string][32]byt
 		final[id] = *(*[32]byte)(session)
 	}
 	return
+}
+
+func (s *SQLStore) StoreSessions(sessions map[string][]byte, oldAddresses []string) {
+	if len(oldAddresses) > 0 {
+		query := removeSessionsQuery + "("
+		queryParams := make([]interface{}, len(oldAddresses)+1)
+		queryParams[0] = s.JID
+		for index, address := range oldAddresses {
+			if index > 0 {
+				query += ","
+			}
+			query += fmt.Sprintf("@p%d", index+2)
+			queryParams[index+1] = address
+		}
+		query += ")"
+		_, err := s.db.Exec(query, queryParams...)
+		if err != nil {
+			s.log.Errorf("Could not Remove Sessions: " + err.Error())
+			return
+		}
+	}
+	bulkImportStr := mssql.CopyIn("whatsmeow_sessions", mssql.BulkOptions{}, "our_jid", "their_id", "session")
+	stmt, err := s.db.Prepare(bulkImportStr)
+	for address, session := range sessions {
+		stmt.Exec(s.JID, address, session[:])
+	}
+	_, err = stmt.Exec()
+	if err != nil {
+		s.log.Errorf("Could not Store Sessions: " + err.Error())
+	}
+}
+
+func (s *SQLStore) StoreIdentities(identityKeys map[string][32]byte, oldAddresses []string) {
+	if len(oldAddresses) > 0 {
+		query := removeIdentityKeysQuery + "("
+		queryParams := make([]interface{}, len(oldAddresses)+1)
+		queryParams[0] = s.JID
+		for index, address := range oldAddresses {
+			if index > 0 {
+				query += ","
+			}
+			query += fmt.Sprintf("@p%d", index+2)
+			queryParams[index+1] = address
+		}
+		query += ")"
+		_, err := s.db.Exec(query, queryParams...)
+		if err != nil {
+			s.log.Errorf("Could not Remove Identity Keys: " + err.Error())
+			return
+		}
+	}
+	bulkImportStr := mssql.CopyIn("whatsmeow_identity_keys", mssql.BulkOptions{}, "our_jid", "their_id", "identity_info")
+	stmt, err := s.db.Prepare(bulkImportStr)
+	for address, identityInfo := range identityKeys {
+		stmt.Exec(s.JID, address, identityInfo[:])
+	}
+	_, err = stmt.Exec()
+	if err != nil {
+		s.log.Errorf("Could not Store Identity Keys: " + err.Error())
+	}
 }
