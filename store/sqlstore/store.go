@@ -168,13 +168,7 @@ func manageSingleSenderKey(senderkeyUpdate senderkeyUpdate) error {
 	return err
 }
 
-var _ store.IdentityStore = (*SQLStore)(nil)
-var _ store.SessionStore = (*SQLStore)(nil)
-var _ store.PreKeyStore = (*SQLStore)(nil)
-var _ store.SenderKeyStore = (*SQLStore)(nil)
-var _ store.AppStateSyncKeyStore = (*SQLStore)(nil)
-var _ store.AppStateStore = (*SQLStore)(nil)
-var _ store.ContactStore = (*SQLStore)(nil)
+var _ store.AllStores = (*SQLStore)(nil)
 
 const (
 	mssqlPutIdentityQuery = `

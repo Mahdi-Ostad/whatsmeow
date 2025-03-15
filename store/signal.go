@@ -109,20 +109,23 @@ func (device *Device) LoadSession(address *protocol.SignalAddress) *record.Sessi
 		return record.NewSession(SignalProtobufSerializer.Session, SignalProtobufSerializer.State)
 	}
 	var rawSess []byte
+	var err error
 	for i := 0; ; i++ {
-		var err error
 		rawSess, err = device.Sessions.GetSession(address.String())
 		if err == nil || !device.handleDatabaseError(i, err, "load session with %s", address.String()) {
 			break
 		}
 	}
 	if rawSess == nil {
+		if err != nil {
+			return nil
+		}
 		return record.NewSession(SignalProtobufSerializer.Session, SignalProtobufSerializer.State)
 	}
 	sess, err := record.NewSessionFromBytes(rawSess, SignalProtobufSerializer.Session, SignalProtobufSerializer.State)
 	if err != nil {
 		device.Log.Errorf("Failed to deserialize session with %s: %v", address.String(), err)
-		return record.NewSession(SignalProtobufSerializer.Session, SignalProtobufSerializer.State)
+		return nil
 	}
 	return sess
 }

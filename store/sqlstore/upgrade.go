@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 type upgradeFunc func(*sql.Tx, *Container) error
@@ -449,7 +450,8 @@ func upgradeV2(tx *sql.Tx, container *Container) error {
 	if err != nil {
 		return err
 	}
-	if container.dialect == "postgres" || container.dialect == "pgx" {
+
+	if strings.Contains(container.dialect, "postgres") || container.dialect == "pgx" {
 		_, err = tx.Exec(fillSigKeyPostgres)
 	} else if container.dialect == "sqlserver" {
 		_, err = tx.Exec(fillSigKeySqlServer)
