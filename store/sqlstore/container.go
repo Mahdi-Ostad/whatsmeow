@@ -320,6 +320,7 @@ const (
 func (c *Container) NewDevice(managerId string) *store.Device {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+	innerStore := NewSQLStore(c, types.EmptyJID)
 	device := &store.Device{
 		Log:       c.log,
 		Container: c,
@@ -332,6 +333,17 @@ func (c *Container) NewDevice(managerId string) *store.Device {
 		AdvSecretKey:         random.Bytes(32),
 	}
 	device.SignedPreKey = device.IdentityKey.CreateSignedPreKey(1)
+	device.Identities = innerStore
+	device.Sessions = innerStore
+	device.PreKeys = innerStore
+	device.SenderKeys = innerStore
+	device.AppStateKeys = innerStore
+	device.AppState = innerStore
+	device.Contacts = innerStore
+	device.ChatSettings = innerStore
+	device.MsgSecrets = innerStore
+	device.PrivacyTokens = innerStore
+	device.PrekeysCache = innerStore
 	return device
 }
 
