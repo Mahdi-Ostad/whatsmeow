@@ -26,7 +26,7 @@ import (
 
 // Container is a wrapper for a SQL database that can contain multiple whatsmeow sessions.
 type Container struct {
-	db                   *sql.DB
+	db                   *RetryDB
 	dialect              string
 	log                  waLog.Logger
 	mutex                sync.Mutex
@@ -35,7 +35,7 @@ type Container struct {
 
 var _ store.DeviceContainer = (*Container)(nil)
 
-var containerDbInstance *sql.DB
+var containerDbInstance *RetryDB
 
 // New connects to the given SQL database and wraps it in a Container.
 //
@@ -54,7 +54,9 @@ func New(dialect, address string, log waLog.Logger, maxConnection int) (*Contain
 		}
 		db.SetMaxOpenConns(maxConnection)
 		db.SetMaxIdleConns(maxConnection)
-		containerDbInstance = db
+		containerDbInstance = &RetryDB{
+			DB: db,
+		}
 	}
 	container := NewWithDB(containerDbInstance, dialect, log)
 	err := container.Upgrade()
@@ -82,7 +84,7 @@ func New(dialect, address string, log waLog.Logger, maxConnection int) (*Contain
 //
 //	container := sqlstore.NewWithDB(...)
 //	err := container.Upgrade()
-func NewWithDB(db *sql.DB, dialect string, log waLog.Logger) *Container {
+func NewWithDB(db *RetryDB, dialect string, log waLog.Logger) *Container {
 	if log == nil {
 		log = waLog.Noop
 	}

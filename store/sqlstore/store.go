@@ -72,7 +72,7 @@ type identityUpdate struct {
 	jid     string
 }
 
-var sqlInstance *sql.DB
+var sqlInstance *RetryDB
 var contactsChannel = make(chan contactUpdate)
 var senderkeysChannel = make(chan senderkeyUpdate)
 
