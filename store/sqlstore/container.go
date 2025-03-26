@@ -96,7 +96,7 @@ func NewWithDB(db *RetryDB, dialect string, log waLog.Logger) *Container {
 }
 
 const getAllDevicesQuery = `
-SELECT jid, registration_id, noise_key, identity_key,
+SELECT jid, lid, registration_id, noise_key, identity_key,
        signed_pre_key, signed_pre_key_id, signed_pre_key_sig,
        adv_key, adv_details, adv_account_sig, adv_account_sig_key, adv_device_sig,
        platform, business_name, push_name, facebook_uuid, manager_id
@@ -181,7 +181,7 @@ func (c *Container) scanDevice(row scannable) (*store.Device, error) {
 	var fbUUID uuid.NullUUID
 
 	err := row.Scan(
-		&device.ID, &device.RegistrationID, &noisePriv, &identityPriv,
+		&device.ID, &device.LID, &device.RegistrationID, &noisePriv, &identityPriv,
 		&preKeyPriv, &device.SignedPreKey.KeyID, &preKeySig,
 		&device.AdvSecretKey, &account.Details, &account.AccountSignature, &account.AccountSignatureKey, &account.DeviceSignature,
 		&device.Platform, &device.BusinessName, &device.PushName, &fbUUID, &device.ManagerId, &device.LockTime)
@@ -331,23 +331,26 @@ func (c *Container) GetDevice(jid types.JID) (*store.Device, error) {
 
 const (
 	sqliteInsertDeviceQuery = `
-		INSERT INTO whatsmeow_device (jid, registration_id, noise_key, identity_key,
+		INSERT INTO whatsmeow_device (jid, lid, registration_id, noise_key, identity_key,
 									  signed_pre_key, signed_pre_key_id, signed_pre_key_sig,
 									  adv_key, adv_details, adv_account_sig, adv_account_sig_key, adv_device_sig,
 									  platform, business_name, push_name, facebook_uuid, manager_id)
-		VALUES (@p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8, @p9, @p10, @p11, @p12, @p13, @p14, @p15, @p16, @p17)
+		VALUES (@p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8, @p9, @p10, @p11, @p12, @p13, @p14, @p15, @p16, @p17, @p18)
 		ON CONFLICT (jid) DO UPDATE
-		    SET platform=excluded.platform, business_name=excluded.business_name, push_name=excluded.push_name
+			SET lid=excluded.lid,
+				platform=excluded.platform,
+				business_name=excluded.business_name,
+				push_name=excluded.push_name
 	`
 	mssqlInsertDeviceQuery = `
 		MERGE INTO whatsmeow_device AS target
-		USING (VALUES (@p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8, @p9, @p10, @p11, @p12, @p13, @p14, @p15, @p16, @p17)) AS source (jid, registration_id, noise_key, identity_key, signed_pre_key, signed_pre_key_id, signed_pre_key_sig, adv_key, adv_details, adv_account_sig, adv_account_sig_key, adv_device_sig, platform, business_name, push_name, facebook_uuid, manager_id)
+		USING (VALUES (@p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8, @p9, @p10, @p11, @p12, @p13, @p14, @p15, @p16, @p17, @p18)) AS source (jid, lid, registration_id, noise_key, identity_key, signed_pre_key, signed_pre_key_id, signed_pre_key_sig, adv_key, adv_details, adv_account_sig, adv_account_sig_key, adv_device_sig, platform, business_name, push_name, facebook_uuid, manager_id)
 		ON (target.jid = source.jid)
 		WHEN MATCHED THEN
-			UPDATE SET target.platform = source.platform, target.business_name = source.business_name, target.push_name = source.push_name
+			UPDATE SET target.lid = source.lid, target.platform = source.platform, target.business_name = source.business_name, target.push_name = source.push_name
 		WHEN NOT MATCHED THEN
-			INSERT (jid, registration_id, noise_key, identity_key, signed_pre_key, signed_pre_key_id, signed_pre_key_sig, adv_key, adv_details, adv_account_sig, adv_account_sig_key, adv_device_sig, platform, business_name, push_name, facebook_uuid, manager_id)
-			VALUES (source.jid, source.registration_id, CONVERT(varbinary(max),source.noise_key), source.identity_key, source.signed_pre_key, source.signed_pre_key_id, source.signed_pre_key_sig, source.adv_key, source.adv_details, source.adv_account_sig, source.adv_account_sig_key, source.adv_device_sig, source.platform, source.business_name, source.push_name, source.facebook_uuid, source.manager_id);
+			INSERT (jid, lid, registration_id, noise_key, identity_key, signed_pre_key, signed_pre_key_id, signed_pre_key_sig, adv_key, adv_details, adv_account_sig, adv_account_sig_key, adv_device_sig, platform, business_name, push_name, facebook_uuid, manager_id)
+			VALUES (source.jid, source.lid, source.registration_id, CONVERT(varbinary(max),source.noise_key), source.identity_key, source.signed_pre_key, source.signed_pre_key_id, source.signed_pre_key_sig, source.adv_key, source.adv_details, source.adv_account_sig, source.adv_account_sig_key, source.adv_device_sig, source.platform, source.business_name, source.push_name, source.facebook_uuid, source.manager_id);
 	`
 	deleteDeviceQuery  = `DELETE FROM whatsmeow_device WHERE jid=@p1`
 	deleteMessageNodes = `DELETE FROM whatsapp_message_node WHERE our_jid=@p1`
@@ -409,13 +412,13 @@ func (c *Container) PutDevice(device *store.Device) error {
 	var err error
 	if c.dialect == "sqlserver" {
 		_, err = c.db.Exec(mssqlInsertDeviceQuery,
-			device.ID.String(), device.RegistrationID, device.NoiseKey.Priv[:], device.IdentityKey.Priv[:],
+			device.ID.String(), device.LID, device.RegistrationID, device.NoiseKey.Priv[:], device.IdentityKey.Priv[:],
 			device.SignedPreKey.Priv[:], device.SignedPreKey.KeyID, device.SignedPreKey.Signature[:],
 			device.AdvSecretKey, device.Account.Details, device.Account.AccountSignature, device.Account.AccountSignatureKey, device.Account.DeviceSignature,
 			device.Platform, device.BusinessName, device.PushName, device.FacebookUUID.String(), device.ManagerId)
 	} else {
 		_, err = c.db.Exec(sqliteInsertDeviceQuery,
-			device.ID.String(), device.RegistrationID, device.NoiseKey.Priv[:], device.IdentityKey.Priv[:],
+			device.ID.String(), device.LID, device.RegistrationID, device.NoiseKey.Priv[:], device.IdentityKey.Priv[:],
 			device.SignedPreKey.Priv[:], device.SignedPreKey.KeyID, device.SignedPreKey.Signature[:],
 			device.AdvSecretKey, device.Account.Details, device.Account.AccountSignature, device.Account.AccountSignatureKey, device.Account.DeviceSignature,
 			device.Platform, device.BusinessName, device.PushName, uuid.NullUUID{UUID: device.FacebookUUID, Valid: device.FacebookUUID != uuid.Nil}, device.ManagerId)
@@ -445,7 +448,7 @@ func (c *Container) DeleteDevice(store *store.Device) error {
 	if store.ID == nil {
 		return ErrDeviceIDMustBeSet
 	}
-	_, err := c.db.Exec(deleteDeviceQuery, store.ID.String())
+	_, err := c.db.Exec(deleteDeviceQuery, store.ID)
 	return err
 }
 
