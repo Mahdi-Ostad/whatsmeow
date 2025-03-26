@@ -156,7 +156,7 @@ func (device *Device) ContainsSession(remoteAddress *protocol.SignalAddress) boo
 	}
 	for i := 0; ; i++ {
 		hasSession, err := device.Sessions.HasSession(remoteAddress.String())
-		if err == nil || !device.handleDatabaseError(i, err, "store has session for %s", remoteAddress.String()) {
+		if err == nil || !device.handleDatabaseError(i, err, "check if store has session for %s", remoteAddress.String()) {
 			return hasSession
 		}
 	}
