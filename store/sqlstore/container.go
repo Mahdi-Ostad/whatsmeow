@@ -7,18 +7,21 @@
 package sqlstore
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
-	mathRand "math/rand"
+	mathRand "math/rand/v2"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"go.mau.fi/util/dbutil"
 	"go.mau.fi/util/random"
 
 	"go.mau.fi/whatsmeow/proto/waAdv"
 	"go.mau.fi/whatsmeow/store"
+	"go.mau.fi/whatsmeow/store/sqlstore/upgrades"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/util/keys"
 	waLog "go.mau.fi/whatsmeow/util/log"
@@ -84,15 +87,40 @@ func New(dialect, address string, log waLog.Logger, maxConnection int) (*Contain
 //
 //	container := sqlstore.NewWithDB(...)
 //	err := container.Upgrade()
-func NewWithDB(db *RetryDB, dialect string, log waLog.Logger) *Container {
+func NewWithDB(db *sql.DB, dialect string, log waLog.Logger) *Container {
+	wrapped, err := dbutil.NewWithDB(db, dialect)
+	if err != nil {
+		// This will only panic if the dialect is invalid
+		panic(err)
+	}
+	wrapped.UpgradeTable = upgrades.Table
+	wrapped.VersionTable = "whatsmeow_version"
+	return NewWithWrappedDB(wrapped, log)
+}
+
+func NewWithWrappedDB(wrapped *RetryDB, log waLog.Logger) *Container {
 	if log == nil {
 		log = waLog.Noop
 	}
 	return &Container{
-		db:      db,
-		dialect: dialect,
-		log:     log,
+		db:  wrapped,
+		log: log,
 	}
+}
+
+// Upgrade upgrades the database from the current to the latest version available.
+func (c *Container) Upgrade() error {
+	if c.db.Dialect == dbutil.SQLite {
+		var foreignKeysEnabled bool
+		err := c.db.QueryRow(context.TODO(), "PRAGMA foreign_keys").Scan(&foreignKeysEnabled)
+		if err != nil {
+			return fmt.Errorf("failed to check if foreign keys are enabled: %w", err)
+		} else if !foreignKeysEnabled {
+			return fmt.Errorf("foreign keys are not enabled")
+		}
+	}
+
+	return c.db.Upgrade(context.TODO())
 }
 
 const getAllDevicesQuery = `
@@ -133,10 +161,6 @@ const getNumberManager = `SELECT TOP 1 manager_id FROM whatsmeow_device WHERE ji
 
 const getDeviceQuery = getAllDevicesQuery + " WHERE jid=@p1"
 
-type scannable interface {
-	Scan(dest ...interface{}) error
-}
-
 func (c *Container) GetActiveManagers() ([]string, error) {
 	// conn, err := c.db.Conn(ctx)
 	// if err != nil {
@@ -170,8 +194,7 @@ func (c *Container) GetNumberManager(jid types.JID) (string, error) {
 	}
 	return managerId, nil
 }
-
-func (c *Container) scanDevice(row scannable) (*store.Device, error) {
+func (c *Container) scanDevice(row dbutil.Scannable) (*store.Device, error) {
 	var device store.Device
 	device.DatabaseErrorHandler = c.DatabaseErrorHandler
 	device.Log = c.log
@@ -218,14 +241,14 @@ func (c *Container) scanDevice(row scannable) (*store.Device, error) {
 
 // GetAllDevices finds all the devices in the database.
 func (c *Container) GetAllDevices() ([]*store.Device, error) {
-	rows, err := c.db.Query(getAllDevicesQuery)
+	res, err := c.db.Query(context.TODO(), getAllDevicesQuery)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query sessions: %w", err)
 	}
-	defer rows.Close()
+	defer res.Close()
 	sessions := make([]*store.Device, 0)
-	for rows.Next() {
-		sess, scanErr := c.scanDevice(rows)
+	for res.Next() {
+		sess, scanErr := c.scanDevice(res)
 		if scanErr != nil {
 			return sessions, scanErr
 		}
@@ -322,7 +345,7 @@ func (c *Container) UnlockManagerDevice(managerId string, lastLock int64) error 
 //
 // Note that the parameter usually must be an AD-JID.
 func (c *Container) GetDevice(jid types.JID) (*store.Device, error) {
-	sess, err := c.scanDevice(c.db.QueryRow(getDeviceQuery, jid))
+	sess, err := c.scanDevice(c.db.QueryRow(context.TODO(), getDeviceQuery, jid))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -411,13 +434,13 @@ func (c *Container) PutDevice(device *store.Device) error {
 	}
 	var err error
 	if c.dialect == "sqlserver" {
-		_, err = c.db.Exec(mssqlInsertDeviceQuery,
+		_, err = c.db.Exec(context.TODO(), mssqlInsertDeviceQuery,
 			device.ID.String(), device.LID, device.RegistrationID, device.NoiseKey.Priv[:], device.IdentityKey.Priv[:],
 			device.SignedPreKey.Priv[:], device.SignedPreKey.KeyID, device.SignedPreKey.Signature[:],
 			device.AdvSecretKey, device.Account.Details, device.Account.AccountSignature, device.Account.AccountSignatureKey, device.Account.DeviceSignature,
 			device.Platform, device.BusinessName, device.PushName, device.FacebookUUID.String(), device.ManagerId)
 	} else {
-		_, err = c.db.Exec(sqliteInsertDeviceQuery,
+		_, err = c.db.Exec(context.TODO(), sqliteInsertDeviceQuery,
 			device.ID.String(), device.LID, device.RegistrationID, device.NoiseKey.Priv[:], device.IdentityKey.Priv[:],
 			device.SignedPreKey.Priv[:], device.SignedPreKey.KeyID, device.SignedPreKey.Signature[:],
 			device.AdvSecretKey, device.Account.Details, device.Account.AccountSignature, device.Account.AccountSignatureKey, device.Account.DeviceSignature,
@@ -448,7 +471,7 @@ func (c *Container) DeleteDevice(store *store.Device) error {
 	if store.ID == nil {
 		return ErrDeviceIDMustBeSet
 	}
-	_, err := c.db.Exec(deleteDeviceQuery, store.ID)
+	_, err := c.db.Exec(context.TODO(), deleteDeviceQuery, store.ID)
 	return err
 }
 
