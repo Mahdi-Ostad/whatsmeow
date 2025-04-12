@@ -631,29 +631,40 @@ func (cli *Client) sendGroup(ctx context.Context, to, ownID types.JID, id types.
 
 	start = time.Now()
 	builder := groups.NewGroupSessionBuilder(cli.Store, pbSerializer)
+	builderTime := time.Since(start)
 	senderKeyName := protocol.NewSenderKeyName(to.String(), ownID.SignalAddress())
+	senderKeyNameTime := time.Since(start)
 	signalSKDMessage, err := builder.Create(senderKeyName)
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to create sender key distribution message to send %s to %s: %w", id, to, err)
 	}
+	signalSKDMessageTime := time.Since(start)
 	skdMessage := &waE2E.Message{
 		SenderKeyDistributionMessage: &waE2E.SenderKeyDistributionMessage{
 			GroupID:                             proto.String(to.String()),
 			AxolotlSenderKeyDistributionMessage: signalSKDMessage.Serialize(),
 		},
 	}
+	skdMessageTime := time.Since(start)
 	skdPlaintext, err := proto.Marshal(skdMessage)
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to marshal sender key distribution message to send %s to %s: %w", id, to, err)
 	}
-
+	skdPlaintextTime := time.Since(start)
 	cipher := groups.NewGroupCipher(builder, senderKeyName, cli.Store)
+	cipherTime := time.Since(start)
 	encrypted, err := cipher.Encrypt(padMessage(plaintext))
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to encrypt group message to send %s to %s: %w", id, to, err)
 	}
+	encryptedTime := time.Since(start)
 	ciphertext := encrypted.SignedSerialize()
 	timings.GroupEncrypt = time.Since(start)
+
+	if timings.GroupEncrypt > time.Second*10 {
+		cli.Log.Infof(fmt.Sprintf("SENDGROUPSLOW! builderTime: %d, senderKeyNameTime: %d, signalSKDMessageTime: %d, skdMessageTime: %d, skdPlaintextTime: %d, cipherTime: %d, encryptedTime: %d, finalTime: %d",
+			builderTime.Milliseconds(), senderKeyNameTime.Milliseconds(), signalSKDMessageTime.Milliseconds(), skdMessageTime.Milliseconds(), skdPlaintextTime.Milliseconds(), cipherTime.Milliseconds(), encryptedTime.Milliseconds(), timings.GroupEncrypt.Milliseconds()))
+	}
 
 	node, allDevices, err := cli.prepareMessageNode(ctx, to, ownID, id, message, participants, skdPlaintext, nil, timings, botNode)
 	if err != nil {
