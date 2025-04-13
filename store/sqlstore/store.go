@@ -57,7 +57,6 @@ type senderkeyUpdate struct {
 	group    string
 	user     string
 	session  []byte
-	err      chan<- error
 }
 
 type sessionUpdate struct {
@@ -153,7 +152,9 @@ func ManageContacts(logger waLog.Logger) {
 func ManageSenderKeys() {
 	for update := range senderkeysChannel {
 		err := manageSingleSenderKey(update)
-		update.err <- err
+		if err != nil {
+			update.sqlStore.log.Errorf(err.Error())
+		}
 	}
 }
 
@@ -468,16 +469,11 @@ const (
 )
 
 func (s *SQLStore) PutSenderKey(group, user string, session []byte) error {
-	res := make(chan error, 1)
 	senderkeysChannel <- senderkeyUpdate{
 		group:    group,
 		user:     user,
 		session:  session,
 		sqlStore: s,
-		err:      res,
-	}
-	for err := range res {
-		return err
 	}
 	return nil
 }
