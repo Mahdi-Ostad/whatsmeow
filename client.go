@@ -173,6 +173,7 @@ type Client struct {
 	MessengerConfig *MessengerConfig
 	RefreshCAT      func() error
 	HasFailedLogin  bool
+	HandlingEvents  int
 }
 
 type MessengerConfig struct {
@@ -733,6 +734,7 @@ func (cli *Client) handlerQueueLoop(ctx context.Context) {
 		case node := <-cli.handlerQueue:
 			doneChan := make(chan struct{}, 1)
 			go func() {
+				cli.HandlingEvents++
 				start := time.Now()
 				cli.nodeHandlers[node.Tag](node)
 				duration := time.Since(start)
@@ -740,6 +742,7 @@ func (cli *Client) handlerQueueLoop(ctx context.Context) {
 				if duration > 5*time.Second {
 					cli.Log.Warnf("Node handling took %s for %s", duration, node.XMLString())
 				}
+				cli.HandlingEvents--
 			}()
 			timer.Reset(5 * time.Minute)
 			select {
