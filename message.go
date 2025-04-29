@@ -219,6 +219,12 @@ func (cli *Client) handlePlaintextMessage(info *types.MessageInfo, node *waBinar
 	return
 }
 
+type timeStamping struct {
+	duration time.Duration
+	tag      string
+	section  int
+}
+
 func (cli *Client) decryptMessages(info *types.MessageInfo, node *waBinary.Node) {
 	unavailableNode, ok := node.GetOptionalChildByTag("unavailable")
 	if ok && len(node.GetChildrenByTag("enc")) == 0 {
@@ -233,6 +239,8 @@ func (cli *Client) decryptMessages(info *types.MessageInfo, node *waBinary.Node)
 	cli.Log.Debugf("Decrypting message from %s", info.SourceString())
 	handled := false
 	containsDirectMsg := false
+	durations := []timeStamping{}
+	var start time.Time
 	for _, child := range children {
 		if child.Tag != "enc" {
 			continue
@@ -245,13 +253,20 @@ func (cli *Client) decryptMessages(info *types.MessageInfo, node *waBinary.Node)
 		var decrypted []byte
 		var err error
 		if encType == "pkmsg" || encType == "msg" {
+			//Section 1
+			start = time.Now()
 			decrypted, err = cli.decryptDM(&child, info.Sender, encType == "pkmsg")
 			containsDirectMsg = true
+			durations = append(durations, timeStamping{time.Since(start), child.Tag, 1})
 		} else if info.IsGroup && encType == "skmsg" {
+			//Section 2
+			start = time.Now()
 			decrypted, err = cli.decryptGroupMsg(&child, info.Sender, info.Chat)
+			durations = append(durations, timeStamping{time.Since(start), child.Tag, 2})
 		} else if encType == "msmsg" && info.Sender.IsBot() {
+			//Section 3
 			// Meta AI / other bots (biz?):
-
+			start = time.Now()
 			// step 1: get message secret
 			targetSenderJID := info.MsgMetaInfo.TargetSender
 			if targetSenderJID.User == "" {
@@ -261,6 +276,7 @@ func (cli *Client) decryptMessages(info *types.MessageInfo, node *waBinary.Node)
 
 			messageSecret, err := cli.Store.MsgSecrets.GetMessageSecret(info.Chat, targetSenderJID, info.MsgMetaInfo.TargetID)
 			if err != nil || messageSecret == nil {
+				durations = append(durations, timeStamping{time.Since(start), child.Tag, -3})
 				cli.Log.Warnf("Error getting message secret for bot msg with id %s", node.AttrGetter().String("id"))
 				continue
 			}
@@ -271,6 +287,7 @@ func (cli *Client) decryptMessages(info *types.MessageInfo, node *waBinary.Node)
 
 			err = proto.Unmarshal(byteContents, &msMsg)
 			if err != nil {
+				durations = append(durations, timeStamping{time.Since(start), child.Tag, -3})
 				cli.Log.Warnf("Error decoding MessageSecretMesage protobuf %v", err)
 				continue
 			}
@@ -285,6 +302,7 @@ func (cli *Client) decryptMessages(info *types.MessageInfo, node *waBinary.Node)
 
 			// step 4: decrypt and voila
 			decrypted, err = cli.decryptBotMessage(messageSecret, &msMsg, messageID, targetSenderJID, info)
+			durations = append(durations, timeStamping{time.Since(start), child.Tag, 3})
 		} else {
 			cli.Log.Warnf("Unhandled encrypted message (type %s) from %s", encType, info.SourceString())
 			continue
@@ -304,12 +322,16 @@ func (cli *Client) decryptMessages(info *types.MessageInfo, node *waBinary.Node)
 			})
 			return
 		}
+		//Section 4
+		start = time.Now()
 		retryCount := ag.OptionalInt("count")
 		cli.cancelDelayedRequestFromPhone(info.ID)
-
+		durations = append(durations, timeStamping{time.Since(start), child.Tag, 4})
 		var msg waE2E.Message
 		switch ag.Int("v") {
 		case 2:
+			//Section 5
+			start = time.Now()
 			err = proto.Unmarshal(decrypted, &msg)
 			if err != nil {
 				cli.Log.Warnf("Error unmarshaling decrypted message from %s: %v", info.SourceString(), err)
@@ -317,8 +339,12 @@ func (cli *Client) decryptMessages(info *types.MessageInfo, node *waBinary.Node)
 			}
 			cli.handleDecryptedMessage(info, &msg, retryCount)
 			handled = true
+			durations = append(durations, timeStamping{time.Since(start), child.Tag, 5})
 		case 3:
+			start = time.Now()
+			//Section 6
 			handled = cli.handleDecryptedArmadillo(info, decrypted, retryCount)
+			durations = append(durations, timeStamping{time.Since(start), child.Tag, 6})
 		default:
 			cli.Log.Warnf("Unknown version %d in decrypted message from %s", ag.Int("v"), info.SourceString())
 		}
@@ -326,6 +352,21 @@ func (cli *Client) decryptMessages(info *types.MessageInfo, node *waBinary.Node)
 	if handled {
 		go cli.sendMessageReceipt(info)
 	}
+	str, total := getValue(durations)
+	cli.Log.Infof(fmt.Sprintf("Decrypted message from %s: %s - Total Time: %s", info.ID, str, total.String()))
+}
+
+func getValue(durations []timeStamping) (string, time.Duration) {
+	res := ""
+	total := time.Duration(0)
+	for _, duration := range durations {
+		total += duration.duration
+		if duration.duration < time.Second {
+			continue
+		}
+		res += fmt.Sprintf("Section %d (%s): %s, ", duration.section, duration.tag, duration.duration.String())
+	}
+	return res, total
 }
 
 func (cli *Client) clearUntrustedIdentity(target types.JID) {

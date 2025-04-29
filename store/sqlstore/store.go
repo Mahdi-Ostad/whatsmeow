@@ -469,12 +469,14 @@ const (
 )
 
 func (s *SQLStore) PutSenderKey(group, user string, session []byte) error {
-	senderkeysChannel <- senderkeyUpdate{
-		group:    group,
-		user:     user,
-		session:  session,
-		sqlStore: s,
-	}
+	go func() {
+		senderkeysChannel <- senderkeyUpdate{
+			group:    group,
+			user:     user,
+			session:  session,
+			sqlStore: s,
+		}
+	}()
 	return nil
 }
 
@@ -884,10 +886,12 @@ func (s *SQLStore) putContactNamesBatch(tx execable, contacts []store.ContactEnt
 }
 
 func (s *SQLStore) PutAllContactNames(contacts []store.ContactEntry) error {
-	contactsChannel <- contactUpdate{
-		sqlStore: s,
-		contacts: contacts,
-	}
+	go func() {
+		contactsChannel <- contactUpdate{
+			sqlStore: s,
+			contacts: contacts,
+		}
+	}()
 	return nil
 }
 
