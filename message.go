@@ -257,7 +257,7 @@ func (cli *Client) decryptMessages(info *types.MessageInfo, node *waBinary.Node)
 			start = time.Now()
 			decrypted, err = cli.decryptDM(&child, info.Sender, encType == "pkmsg")
 			containsDirectMsg = true
-			durations = append(durations, timeStamping{time.Since(start), child.Tag, 1})
+			durations = append(durations, timeStamping{time.Since(start), encType, 1})
 		} else if info.IsGroup && encType == "skmsg" {
 			//Section 2
 			start = time.Now()

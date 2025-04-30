@@ -578,6 +578,12 @@ func (s *SQLStore) GetPreKey(id uint32) (*keys.PreKey, error) {
 }
 
 func (s *SQLStore) RemovePreKey(id uint32) error {
+	go func() {
+		removePreKeyChannel <- removePreKeyUpdate{
+			sqlStore: s,
+			id:       id,
+		}
+	}()
 	return nil
 }
 
@@ -1242,6 +1248,15 @@ func (s *SQLStore) PutMessageSecrets(inserts []store.MessageSecretInsert) (err e
 }
 
 func (s *SQLStore) PutMessageSecret(chat, sender types.JID, id types.MessageID, secret []byte) (err error) {
+	go func() {
+		putMessageSecretChannel <- putMessageSecretUpdate{
+			sqlStore: s,
+			chat:     chat,
+			sender:   sender,
+			id:       id,
+			secret:   secret,
+		}
+	}()
 	return nil
 }
 
