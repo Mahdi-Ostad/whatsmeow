@@ -60,20 +60,39 @@ type senderkeyUpdate struct {
 }
 
 type sessionUpdate struct {
-	address string
-	session []byte
-	jid     string
+	sqlStore *SQLStore
+	address  string
+	session  []byte
+	isAdd    bool
 }
 
 type identityUpdate struct {
-	address string
-	key     [32]byte
-	jid     string
+	sqlStore *SQLStore
+	address  string
+	key      [32]byte
+	isAdd    bool
+}
+
+type removePreKeyUpdate struct {
+	sqlStore *SQLStore
+	id       uint32
+}
+
+type putMessageSecretUpdate struct {
+	sqlStore *SQLStore
+	chat     types.JID
+	sender   types.JID
+	id       types.MessageID
+	secret   []byte
 }
 
 var sqlInstance *RetryDB
 var contactsChannel = make(chan contactUpdate)
 var senderkeysChannel = make(chan senderkeyUpdate)
+var sessionChannel = make(chan sessionUpdate)
+var identityChannel = make(chan identityUpdate)
+var removePreKeyChannel = make(chan removePreKeyUpdate)
+var putMessageSecretChannel = make(chan putMessageSecretUpdate)
 
 // NewSQLStore creates a new SQLStore with the given database container and user JID.
 // It contains implementations of all the different stores in the store package.
@@ -102,42 +121,9 @@ func ManageContacts(logger waLog.Logger) {
 		}
 	}()
 	for contactUpdate := range contactsChannel {
-		if len(contactUpdate.contacts) > contactBatchSize {
-			tx, err := sqlInstance.Begin()
-			if err != nil {
-				logger.Errorf("failed to start transaction: " + err.Error())
-				continue
-			}
-			for i := 0; i < len(contactUpdate.contacts); i += contactBatchSize {
-				var contactSlice []store.ContactEntry
-				if len(contactUpdate.contacts) > i+contactBatchSize {
-					contactSlice = contactUpdate.contacts[i : i+contactBatchSize]
-				} else {
-					contactSlice = contactUpdate.contacts[i:]
-				}
-				err = contactUpdate.sqlStore.putContactNamesBatch(tx, contactSlice)
-				if err != nil {
-					break
-				}
-			}
-			if err != nil {
-				logger.Errorf(err.Error())
-				tx.Rollback()
-				continue
-			}
-			err = tx.Commit()
-			if err != nil {
-				logger.Errorf("failed to commit transaction: " + err.Error())
-				continue
-			}
-		} else if len(contactUpdate.contacts) > 0 {
-			err := contactUpdate.sqlStore.putContactNamesBatch(contactUpdate.sqlStore.db, contactUpdate.contacts)
-			if err != nil {
-				logger.Errorf(err.Error())
-				continue
-			}
-		} else {
-			continue
+		err := bulkInsertContacts(contactUpdate)
+		if err != nil {
+			logger.Errorf("Could Not Insert Contacts: %s", err.Error())
 		}
 		contactUpdate.sqlStore.contactCacheLock.Lock()
 		// Just clear the cache, fetching pushnames and business names would be too much effort
@@ -147,6 +133,65 @@ func ManageContacts(logger waLog.Logger) {
 		}
 		contactUpdate.sqlStore.contactCacheLock.Unlock()
 	}
+}
+
+func bulkInsertContacts(update contactUpdate) error {
+	tx, err := update.sqlStore.db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	dt := time.Now()
+	_, err = tx.Exec(fmt.Sprintf(`CREATE TABLE staging_contacts_%d (
+			our_jid       VARCHAR(300),
+			their_jid     VARCHAR(300),
+			first_name    VARCHAR(300),
+			full_name     VARCHAR(300)
+		)
+	`, dt.UnixMilli()))
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("failed to create table: %w", err)
+	}
+	bulkImportStr := mssql.CopyIn(fmt.Sprintf("staging_contacts_%d", dt.UnixMilli()), mssql.BulkOptions{}, "our_jid", "their_jid", "first_name", "full_name")
+	stmt, err := tx.Prepare(bulkImportStr)
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("failed to prepare bulk: %w", err)
+	}
+	for _, insert := range update.contacts {
+		_, err = stmt.Exec(update.sqlStore.JID, insert.JID.String(), insert.FirstName, insert.FullName)
+		if err != nil {
+			tx.Rollback()
+			return fmt.Errorf("failed to prepare insert: %w", err)
+		}
+	}
+	_, err = stmt.Exec()
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("failed to execute bulk: %w", err)
+	}
+	_, err = tx.Exec(fmt.Sprintf(`MERGE INTO whatsmeow_contacts AS target 
+		USING staging_contacts_%d AS source 
+		ON target.our_jid = source.our_jid AND target.their_jid = source.their_jid 
+		WHEN MATCHED THEN
+			UPDATE SET target.first_name = source.first_name, target.full_name = source.full_name
+		WHEN NOT MATCHED THEN
+			INSERT (our_jid, their_jid, first_name, full_name)
+			VALUES (source.our_jid, source.their_jid, source.first_name, source.full_name);`, dt.UnixMilli()))
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("failed to merge bulk: %w", err)
+	}
+	_, err = tx.Exec(fmt.Sprintf("DROP TABLE staging_contacts_%d", dt.UnixMilli()))
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("failed to merge bulk: %w", err)
+	}
+	err = tx.Commit()
+	if err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+	return err
 }
 
 func ManageSenderKeys() {
@@ -167,6 +212,106 @@ func manageSingleSenderKey(senderkeyUpdate senderkeyUpdate) error {
 	}
 	_, err := senderkeyUpdate.sqlStore.db.Exec(sqlitePutSenderKeyQuery, senderkeyUpdate.sqlStore.JID, senderkeyUpdate.group, senderkeyUpdate.user, senderkeyUpdate.session)
 	return err
+}
+
+func ManageSessions(logger waLog.Logger) {
+	for update := range sessionChannel {
+		var err error
+		if update.isAdd {
+			err = putSingleSession(update)
+		} else {
+			err = deleteSingleSession(update)
+		}
+		if err != nil {
+			logger.Errorf("Could Not Update Session %s: %s", update.address, err.Error())
+		}
+	}
+}
+
+func putSingleSession(update sessionUpdate) (err error) {
+	update.sqlStore.mutex.Lock()
+	defer update.sqlStore.mutex.Unlock()
+	if update.sqlStore.dialect == "sqlserver" {
+		_, err = update.sqlStore.db.Exec(mssqlPutSessionQuery, update.sqlStore.JID, update.address, update.session)
+	} else {
+		_, err = update.sqlStore.db.Exec(sqlitePutSessionQuery, update.sqlStore.JID, update.address, update.session)
+	}
+	return err
+}
+
+func deleteSingleSession(update sessionUpdate) (err error) {
+	update.sqlStore.mutex.Lock()
+	defer update.sqlStore.mutex.Unlock()
+	_, err = update.sqlStore.db.Exec(deleteSessionQuery, update.sqlStore.JID, update.address)
+	return err
+}
+
+func ManageIdentities(logger waLog.Logger) {
+	for update := range identityChannel {
+		var err error
+		if update.isAdd {
+			err = putSingleIdentity(update)
+		} else {
+			err = deleteSingleIdentity(update)
+		}
+		if err != nil {
+			logger.Errorf("Could Not Update Identity %s: %s", update.address, err.Error())
+		}
+	}
+}
+
+func putSingleIdentity(update identityUpdate) (err error) {
+	update.sqlStore.mutex.Lock()
+	defer update.sqlStore.mutex.Unlock()
+	if update.sqlStore.dialect == "sqlserver" {
+		_, err := update.sqlStore.db.Exec(mssqlPutIdentityQuery, update.sqlStore.JID, update.address, update.key[:])
+		return err
+	}
+	_, err = update.sqlStore.db.Exec(sqlitePutIdentityQuery, update.sqlStore.JID, update.address, update.key[:])
+	return err
+}
+
+func deleteSingleIdentity(update identityUpdate) (err error) {
+	update.sqlStore.mutex.Lock()
+	defer update.sqlStore.mutex.Unlock()
+	_, err = update.sqlStore.db.Exec(deleteAllIdentitiesQuery, update.sqlStore.JID, update.address)
+	return err
+}
+
+func ManageRemovingPreKeys(logger waLog.Logger) {
+	for update := range removePreKeyChannel {
+		err := singleRemovePreKey(update)
+		if err != nil {
+			logger.Errorf("Could Not Remove PreKey %d: %s", update.id, err.Error())
+		}
+	}
+}
+
+func singleRemovePreKey(update removePreKeyUpdate) (err error) {
+	update.sqlStore.mutex.Lock()
+	defer update.sqlStore.mutex.Unlock()
+	_, err = update.sqlStore.db.Exec(deletePreKeyQuery, update.sqlStore.JID, update.id)
+	return err
+}
+
+func ManagePutMessageSecret(logger waLog.Logger) {
+	for update := range putMessageSecretChannel {
+		err := singlePutMessageSecret(update)
+		if err != nil {
+			logger.Errorf("Could Not Put Message Secret %s: %s", update.id, err.Error())
+		}
+	}
+}
+
+func singlePutMessageSecret(update putMessageSecretUpdate) (err error) {
+	update.sqlStore.mutex.Lock()
+	defer update.sqlStore.mutex.Unlock()
+	if update.sqlStore.dialect == "sqlserver" {
+		_, err = update.sqlStore.db.Exec(mssqlPutMsgSecret, update.sqlStore.JID, update.chat.ToNonAD(), update.sender.ToNonAD(), update.id, update.secret)
+		return
+	}
+	_, err = update.sqlStore.db.Exec(sqlitePutMsgSecret, update.sqlStore.JID, update.chat.ToNonAD(), update.sender.ToNonAD(), update.id, update.secret)
+	return
 }
 
 var _ store.AllStores = (*SQLStore)(nil)
@@ -193,14 +338,15 @@ const (
 )
 
 func (s *SQLStore) PutIdentity(address string, key [32]byte) error {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-	if s.dialect == "sqlserver" {
-		_, err := s.db.Exec(mssqlPutIdentityQuery, s.JID, address, key[:])
-		return err
-	}
-	_, err := s.db.Exec(sqlitePutIdentityQuery, s.JID, address, key[:])
-	return err
+	go func() {
+		identityChannel <- identityUpdate{
+			sqlStore: s,
+			address:  address,
+			key:      key,
+			isAdd:    true,
+		}
+	}()
+	return nil
 }
 
 func (s *SQLStore) DeleteAllIdentities(phone string) error {
@@ -211,10 +357,14 @@ func (s *SQLStore) DeleteAllIdentities(phone string) error {
 }
 
 func (s *SQLStore) DeleteIdentity(address string) error {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-	_, err := s.db.Exec(deleteAllIdentitiesQuery, s.JID, address)
-	return err
+	go func() {
+		identityChannel <- identityUpdate{
+			sqlStore: s,
+			address:  address,
+			isAdd:    false,
+		}
+	}()
+	return nil
 }
 
 func (s *SQLStore) IsTrustedIdentity(address string, key [32]byte) (bool, error) {
@@ -282,15 +432,15 @@ func (s *SQLStore) HasSession(address string) (has bool, err error) {
 }
 
 func (s *SQLStore) PutSession(address string, session []byte) error {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-	var err error
-	if s.dialect == "sqlserver" {
-		_, err = s.db.Exec(mssqlPutSessionQuery, s.JID, address, session)
-	} else {
-		_, err = s.db.Exec(sqlitePutSessionQuery, s.JID, address, session)
-	}
-	return err
+	go func() {
+		sessionChannel <- sessionUpdate{
+			sqlStore: s,
+			address:  address,
+			session:  session,
+			isAdd:    true,
+		}
+	}()
+	return nil
 }
 
 func (s *SQLStore) DeleteAllSessions(phone string) error {
@@ -301,10 +451,14 @@ func (s *SQLStore) DeleteAllSessions(phone string) error {
 }
 
 func (s *SQLStore) DeleteSession(address string) error {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-	_, err := s.db.Exec(deleteSessionQuery, s.JID, address)
-	return err
+	go func() {
+		sessionChannel <- sessionUpdate{
+			sqlStore: s,
+			address:  address,
+			isAdd:    false,
+		}
+	}()
+	return nil
 }
 
 const (
@@ -424,10 +578,7 @@ func (s *SQLStore) GetPreKey(id uint32) (*keys.PreKey, error) {
 }
 
 func (s *SQLStore) RemovePreKey(id uint32) error {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-	_, err := s.db.Exec(deletePreKeyQuery, s.JID, id)
-	return err
+	return nil
 }
 
 func (s *SQLStore) MarkPreKeysAsUploaded(upToID uint32) error {
@@ -647,33 +798,16 @@ func (s *SQLStore) putAppStateMutationMACs(tx execable, name string, version uin
 const mutationBatchSize = 400
 
 func (s *SQLStore) PutAppStateMutationMACs(name string, version uint64, mutations []store.AppStateMutationMAC) error {
-	if len(mutations) > mutationBatchSize {
-		tx, err := s.db.Begin()
-		if err != nil {
-			return fmt.Errorf("failed to start transaction: %w", err)
-		}
-		for i := 0; i < len(mutations); i += mutationBatchSize {
-			var mutationSlice []store.AppStateMutationMAC
-			if len(mutations) > i+mutationBatchSize {
-				mutationSlice = mutations[i : i+mutationBatchSize]
-			} else {
-				mutationSlice = mutations[i:]
-			}
-			err = s.putAppStateMutationMACs(tx, name, version, mutationSlice)
-			if err != nil {
-				_ = tx.Rollback()
-				return err
-			}
-		}
-		err = tx.Commit()
-		if err != nil {
-			return fmt.Errorf("failed to commit transaction: %w", err)
-		}
-		return nil
-	} else if len(mutations) > 0 {
-		return s.putAppStateMutationMACs(s.db, name, version, mutations)
+	bulkimportStr := mssql.CopyIn("whatsmeow_app_state_mutation_macs", mssql.BulkOptions{}, "jid", "name", "version_info", "index_mac", "value_mac")
+	stmt, err := s.db.Prepare(bulkimportStr)
+	if err != nil {
+		return fmt.Errorf("failed to prepare bulk: %w", err)
 	}
-	return nil
+	for _, mutation := range mutations {
+		stmt.Exec(s.JID, name, version, mutation.IndexMAC[:], mutation.ValueMAC[:])
+	}
+	_, err = stmt.Exec()
+	return err
 }
 
 func (s *SQLStore) DeleteAppStateMutationMACs(name string, indexMACs [][]byte) (err error) {
@@ -1059,33 +1193,56 @@ func (s *SQLStore) PutMessageSecrets(inserts []store.MessageSecretInsert) (err e
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
+	dt := time.Now()
+	_, err = tx.Exec(fmt.Sprintf(`CREATE TABLE staging_messagesecrets_%d (
+			our_jid    VARCHAR(300),
+			chat_jid   VARCHAR(200),
+			sender_jid  VARCHAR(200),
+			message_id VARCHAR(200),
+			key_info  VARBINARY(max) NOT NULL
+		)
+	`, dt.UnixMilli()))
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("failed to create table: %w", err)
+	}
+	bulkImportStr := mssql.CopyIn(fmt.Sprintf("staging_messagesecrets_%d", dt.UnixMilli()), mssql.BulkOptions{}, "our_jid", "chat_jid", "sender_jid", "message_id", "key_info")
+	stmt, err := tx.Prepare(bulkImportStr)
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("failed to prepare bulk: %w", err)
+	}
 	for _, insert := range inserts {
-		if s.dialect == "sqlserver" {
-			_, err = tx.Exec(mssqlPutMsgSecret, s.JID, insert.Chat.ToNonAD(), insert.Sender.ToNonAD(), insert.ID, insert.Secret)
-		} else {
-			_, err = tx.Exec(sqlitePutMsgSecret, s.JID, insert.Chat.ToNonAD(), insert.Sender.ToNonAD(), insert.ID, insert.Secret)
-		}
+		_, err = stmt.Exec(s.JID, insert.Chat.ToNonAD(), insert.Sender.ToNonAD(), insert.ID, insert.Secret)
 		if err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("failed to insert secret "+s.JID+": %w", err)
+			tx.Rollback()
+			return fmt.Errorf("failed to prepare insert: %w", err)
 		}
+	}
+	_, err = stmt.Exec()
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("failed to execute bulk: %w", err)
+	}
+	_, err = tx.Exec(fmt.Sprintf("MERGE INTO whatsmeow_message_secrets AS target USING staging_messagesecrets_%d AS source ON target.our_jid = source.our_jid AND target.chat_jid = source.chat_jid AND target.sender_jid = source.sender_jid AND target.message_id = source.message_id WHEN NOT MATCHED THEN INSERT (our_jid, chat_jid, sender_jid, message_id, key_info) VALUES (source.our_jid, source.chat_jid, source.sender_jid, source.message_id, source.key_info);", dt.UnixMilli()))
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("failed to merge bulk: %w", err)
+	}
+	_, err = tx.Exec(fmt.Sprintf("DROP TABLE staging_messagesecrets_%d", dt.UnixMilli()))
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("failed to merge bulk: %w", err)
 	}
 	err = tx.Commit()
 	if err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
-	return
+	return err
 }
 
 func (s *SQLStore) PutMessageSecret(chat, sender types.JID, id types.MessageID, secret []byte) (err error) {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-	if s.dialect == "sqlserver" {
-		_, err = s.db.Exec(mssqlPutMsgSecret, s.JID, chat.ToNonAD(), sender.ToNonAD(), id, secret)
-		return
-	}
-	_, err = s.db.Exec(sqlitePutMsgSecret, s.JID, chat.ToNonAD(), sender.ToNonAD(), id, secret)
-	return
+	return nil
 }
 
 func (s *SQLStore) GetMessageSecret(chat, sender types.JID, id types.MessageID) (secret []byte, err error) {
@@ -1121,24 +1278,61 @@ const (
 )
 
 func (s *SQLStore) PutPrivacyTokens(tokens ...store.PrivacyToken) error {
-	args := make([]any, 1+len(tokens)*3)
-	placeholders := make([]string, len(tokens))
-	args[0] = s.JID
-	for i, token := range tokens {
-		args[i*3+1] = token.User.ToNonAD().String()
-		args[i*3+2] = token.Token
-		args[i*3+3] = token.Timestamp.Unix()
-		placeholders[i] = fmt.Sprintf("(@p1, @p%d, @p%d, @p%d)", i*3+2, i*3+3, i*3+4)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	var query string
-	if s.dialect == "sqlserver" {
-		query = strings.ReplaceAll(mssqlPutPrivacyTokens, "(@p1, @p2, @p3, @p4)", strings.Join(placeholders, ","))
-	} else {
-		query = strings.ReplaceAll(sqlitePutPrivacyTokens, "(@p1, @p2, @p3, @p4)", strings.Join(placeholders, ","))
+	dt := time.Now()
+	_, err = tx.Exec(fmt.Sprintf(`CREATE TABLE staging_privacytokens_%d (
+			our_jid   VARCHAR(300),
+			their_jid VARCHAR(300),
+			token     VARBINARY(max)  NOT NULL,
+			timestamp_info BIGINT NOT NULL,
+		)
+	`, dt.UnixMilli()))
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("failed to create table: %w", err)
 	}
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-	_, err := s.db.Exec(query, args...)
+	bulkImportStr := mssql.CopyIn(fmt.Sprintf("staging_privacytokens_%d", dt.UnixMilli()), mssql.BulkOptions{}, "our_jid", "their_jid", "token", "timestamp_info")
+	stmt, err := tx.Prepare(bulkImportStr)
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("failed to prepare bulk: %w", err)
+	}
+	for _, token := range tokens {
+		_, err = stmt.Exec(s.JID, token.User.ToNonAD().String(), token.Token, token.Timestamp.Unix())
+		if err != nil {
+			tx.Rollback()
+			return fmt.Errorf("failed to prepare insert: %w", err)
+		}
+	}
+	_, err = stmt.Exec()
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("failed to execute bulk: %w", err)
+	}
+	_, err = tx.Exec(fmt.Sprintf(`MERGE INTO whatsmeow_privacy_tokens AS target 
+		USING staging_privacytokens_%d AS source 
+		ON target.our_jid = source.our_jid AND target.their_jid = source.their_jid
+		WHEN MATCHED THEN
+			UPDATE SET target.token = source.token, target.timestamp_info = source.timestamp_info
+		WHEN NOT MATCHED THEN
+			INSERT (our_jid, their_jid, token, timestamp_info)
+			VALUES (source.our_jid, source.their_jid, source.token, source.timestamp_info);`, dt.UnixMilli()))
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("failed to merge bulk: %w", err)
+	}
+	_, err = tx.Exec(fmt.Sprintf("DROP TABLE staging_privacytokens_%d", dt.UnixMilli()))
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("failed to merge bulk: %w", err)
+	}
+	err = tx.Commit()
+	if err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
 	return err
 }
 
