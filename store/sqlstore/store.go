@@ -10,6 +10,7 @@ package sqlstore
 import (
 	"database/sql"
 	"database/sql/driver"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	mssql "github.com/denisenkom/go-mssqldb"
+	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/util/keys"
@@ -1372,10 +1374,15 @@ func (s *SQLStore) GetPrivacyToken(user types.JID) (*store.PrivacyToken, error) 
 }
 
 const (
-	getCacheSessionQuery    = `SELECT their_id, session FROM whatsmeow_sessions WITH (NOLOCK) WHERE our_jid=@p1 AND their_id IN `
-	getCacheIdentityQuery   = `SELECT their_id, identity_info FROM whatsmeow_identity_keys WITH (NOLOCK) WHERE our_jid=@p1 AND their_id IN `
-	removeSessionsQuery     = `DELETE FROM whatsmeow_sessions WHERE our_jid=@p1 AND their_id IN `
-	removeIdentityKeysQuery = `DELETE FROM whatsmeow_identity_keys WHERE our_jid=@p1 AND their_id IN `
+	getCacheSessionQuery     = `SELECT their_id, session FROM whatsmeow_sessions WITH (NOLOCK) WHERE our_jid=@p1 AND their_id IN `
+	getCacheIdentityQuery    = `SELECT their_id, identity_info FROM whatsmeow_identity_keys WITH (NOLOCK) WHERE our_jid=@p1 AND their_id IN `
+	removeSessionsQuery      = `DELETE FROM whatsmeow_sessions WHERE our_jid=@p1 AND their_id IN `
+	removeIdentityKeysQuery  = `DELETE FROM whatsmeow_identity_keys WHERE our_jid=@p1 AND their_id IN `
+	mssqlPutNodeWithGroup    = `INSERT INTO whatsapp_message_node (our_jid, their_jid, group_id, node) VALUES (@p1, @p2, @p3, @p4)`
+	mssqlPutNodeWithoutGroup = `INSERT INTO whatsapp_message_node (our_jid, their_jid, node) VALUES (@p1, @p2, @p3)`
+	getNodesByGroup          = `SELECT id, node FROM whatsapp_message_node WITH (NOLOCK) WHERE our_jid=@p1 AND group_id=@p2`
+	getNodesByPerson         = `SELECT id, node FROM whatsapp_message_node WITH (NOLOCK) WHERE our_jid=@p1 AND their_jid=@p2`
+	removeMessageNodeQuery   = `DELETE FROM whatsapp_message_node WHERE id=@p1`
 )
 
 func (s *SQLStore) CacheSessions(addresses []string) (final map[string][]byte) {
@@ -1490,4 +1497,66 @@ func (s *SQLStore) StoreIdentities(identityKeys map[string][32]byte, oldAddresse
 	if err != nil {
 		s.log.Errorf("Could not Store Identity Keys: " + err.Error())
 	}
+}
+
+func (s *SQLStore) PutMessageNode(user string, group *string, node *waBinary.Node) (err error) {
+	nodeData, err := json.Marshal(node)
+	if err != nil {
+		return fmt.Errorf("failed to marshal node: %w", err)
+	}
+	if group != nil {
+		if s.dialect == "sqlserver" {
+			_, err = s.db.Exec(mssqlPutNodeWithGroup, s.JID, user, *group, nodeData)
+		}
+	} else {
+		if s.dialect == "sqlserver" {
+			_, err = s.db.Exec(mssqlPutNodeWithoutGroup, s.JID, user, nodeData)
+		}
+	}
+	return err
+}
+func (s *SQLStore) GetMessageNodesByUser(user string) (map[int]waBinary.Node, error) {
+	rows, err := s.db.Query(getNodesByPerson, s.JID, user)
+	if err != nil {
+		return nil, err
+	}
+	output := map[int]waBinary.Node{}
+	defer rows.Close()
+	for rows.Next() {
+		var ref int
+		var bytes []byte
+		err = rows.Scan(&ref, &bytes)
+		if err != nil {
+			return nil, fmt.Errorf("error scanning row: %w", err)
+		}
+		node := waBinary.Node{}
+		node.UnmarshalJSON(bytes)
+		output[ref] = node
+	}
+	return output, nil
+}
+func (s *SQLStore) GetMessageNodesByGroup(group string) (map[int]waBinary.Node, error) {
+	rows, err := s.db.Query(getNodesByGroup, s.JID, group)
+	if err != nil {
+		return nil, err
+	}
+	output := map[int]waBinary.Node{}
+	defer rows.Close()
+	for rows.Next() {
+		var ref int
+		var bytes []byte
+		err = rows.Scan(&ref, &bytes)
+		if err != nil {
+			return nil, fmt.Errorf("error scanning row: %w", err)
+		}
+		node := waBinary.Node{}
+		node.UnmarshalJSON(bytes)
+		output[ref] = node
+	}
+	return output, nil
+}
+
+func (s *SQLStore) DeleteMessageNode(ref int) (err error) {
+	_, err = s.db.Exec(removeMessageNodeQuery, ref)
+	return err
 }

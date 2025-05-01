@@ -40,13 +40,40 @@ func (cli *Client) handleEncryptedMessage(node *waBinary.Node) {
 	if err != nil {
 		cli.Log.Warnf("Failed to parse message: %v", err)
 	} else {
+		if info.Chat.Server == types.DefaultUserServer {
+			err = cli.Store.PrekeysCache.PutMessageNode(info.Chat.User, nil, node)
+		} else {
+			err = cli.Store.PrekeysCache.PutMessageNode(info.Sender.User, &info.Chat.User, node)
+		}
+		if err != nil {
+			cli.Log.Errorf("Failed to insert message node: %v", err)
+		}
+		// if info.VerifiedName != nil && len(info.VerifiedName.Details.GetVerifiedName()) > 0 {
+		// 	go cli.updateBusinessName(info.Sender, info, info.VerifiedName.Details.GetVerifiedName())
+		// }
+		// if len(info.PushName) > 0 && info.PushName != "-" {
+		// 	go cli.updatePushName(info.Sender, info, info.PushName)
+		// }
+		// if info.Sender.Server == types.NewsletterServer {
+		// 	cli.handlePlaintextMessage(info, node)
+		// 	} else {
+		// cli.decryptMessages(info, node)
+		// 	}
+		defer cli.maybeDeferredAck(node)()
+	}
+}
+
+func (cli *Client) ManualHandleEncryptedMessage(node *waBinary.Node) {
+	info, err := cli.parseMessageInfo(node)
+	if err != nil {
+		cli.Log.Warnf("Failed to parse message: %v", err)
+	} else {
 		if info.VerifiedName != nil && len(info.VerifiedName.Details.GetVerifiedName()) > 0 {
 			go cli.updateBusinessName(info.Sender, info, info.VerifiedName.Details.GetVerifiedName())
 		}
 		if len(info.PushName) > 0 && info.PushName != "-" {
 			go cli.updatePushName(info.Sender, info, info.PushName)
 		}
-		defer cli.maybeDeferredAck(node)()
 		if info.Sender.Server == types.NewsletterServer {
 			cli.handlePlaintextMessage(info, node)
 		} else {
@@ -135,6 +162,56 @@ func (cli *Client) parseMsgMetaInfo(node waBinary.Node) (metaInfo types.MsgMetaI
 }
 
 func (cli *Client) parseMessageInfo(node *waBinary.Node) (*types.MessageInfo, error) {
+	var info types.MessageInfo
+	var err error
+	info.MessageSource, err = cli.parseMessageSource(node, true)
+	if err != nil {
+		return nil, err
+	}
+	ag := node.AttrGetter()
+	info.ID = types.MessageID(ag.String("id"))
+	info.ServerID = types.MessageServerID(ag.OptionalInt("server_id"))
+	info.Timestamp = ag.UnixTime("t")
+	info.PushName = ag.OptionalString("notify")
+	info.Category = ag.OptionalString("category")
+	info.Type = ag.OptionalString("type")
+	info.Edit = types.EditAttribute(ag.OptionalString("edit"))
+	if !ag.OK() {
+		return nil, ag.Error()
+	}
+
+	for _, child := range node.GetChildren() {
+		switch child.Tag {
+		case "multicast":
+			info.Multicast = true
+		case "verified_name":
+			info.VerifiedName, err = parseVerifiedNameContent(child)
+			if err != nil {
+				cli.Log.Warnf("Failed to parse verified_name node in %s: %v", info.ID, err)
+			}
+		case "bot":
+			info.MsgBotInfo, err = cli.parseMsgBotInfo(child)
+			if err != nil {
+				cli.Log.Warnf("Failed to parse <bot> node in %s: %v", info.ID, err)
+			}
+		case "meta":
+			// TODO parse non-bot metadata too
+			info.MsgMetaInfo, _ = cli.parseMsgMetaInfo(child)
+		case "franking":
+			// TODO
+		case "trace":
+			// TODO
+		default:
+			if mediaType, ok := child.AttrGetter().GetString("mediatype", false); ok {
+				info.MediaType = mediaType
+			}
+		}
+	}
+
+	return &info, nil
+}
+
+func (cli *Client) ManualParseMessageInfo(node *waBinary.Node) (*types.MessageInfo, error) {
 	var info types.MessageInfo
 	var err error
 	info.MessageSource, err = cli.parseMessageSource(node, true)

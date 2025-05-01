@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 
+	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/proto/waAdv"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/util/keys"
@@ -144,6 +145,10 @@ type PrekeysCacheStore interface {
 	CacheIdentities(addresses []string) map[string][32]byte
 	StoreSessions(sessions map[string][]byte, oldAddresses []string)
 	StoreIdentities(identityKeys map[string][32]byte, oldAddresses []string)
+	PutMessageNode(user string, group *string, node *waBinary.Node) error
+	GetMessageNodesByUser(user string) (map[int]waBinary.Node, error)
+	GetMessageNodesByGroup(group string) (map[int]waBinary.Node, error)
+	DeleteMessageNode(ref int) error
 }
 
 type Device struct {
