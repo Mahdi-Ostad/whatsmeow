@@ -1386,10 +1386,13 @@ const (
 )
 
 func (s *SQLStore) CacheSessions(addresses []string) (final map[string][]byte) {
+	final = make(map[string][]byte)
+	if len(addresses) == 0 {
+		return final
+	}
 	query := getCacheSessionQuery + "("
 	queryParams := make([]interface{}, len(addresses)+1)
 	queryParams[0] = s.JID
-	final = make(map[string][]byte)
 	for index, address := range addresses {
 		if index > 0 {
 			query += ","
@@ -1413,10 +1416,13 @@ func (s *SQLStore) CacheSessions(addresses []string) (final map[string][]byte) {
 }
 
 func (s *SQLStore) CacheIdentities(addresses []string) (final map[string][32]byte) {
+	final = make(map[string][32]byte)
+	if len(addresses) == 0 {
+		return final
+	}
 	query := getCacheIdentityQuery + "("
 	queryParams := make([]interface{}, len(addresses)+1)
 	queryParams[0] = s.JID
-	final = make(map[string][32]byte)
 	for index, address := range addresses {
 		if index > 0 {
 			query += ","
