@@ -212,3 +212,7 @@ func (n *NoopStore) PutDevice(store *Device) error {
 func (n *NoopStore) DeleteDevice(store *Device) error {
 	return n.Error
 }
+
+func (n *NoopStore) DeleteMessageNode(store *Device) error {
+	return n.Error
+}

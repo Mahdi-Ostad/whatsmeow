@@ -312,7 +312,8 @@ const (
 			INSERT (jid, registration_id, noise_key, identity_key, signed_pre_key, signed_pre_key_id, signed_pre_key_sig, adv_key, adv_details, adv_account_sig, adv_account_sig_key, adv_device_sig, platform, business_name, push_name, facebook_uuid, manager_id)
 			VALUES (source.jid, source.registration_id, CONVERT(varbinary(max),source.noise_key), source.identity_key, source.signed_pre_key, source.signed_pre_key_id, source.signed_pre_key_sig, source.adv_key, source.adv_details, source.adv_account_sig, source.adv_account_sig_key, source.adv_device_sig, source.platform, source.business_name, source.push_name, source.facebook_uuid, source.manager_id);
 	`
-	deleteDeviceQuery = `DELETE FROM whatsmeow_device WHERE jid=@p1`
+	deleteDeviceQuery  = `DELETE FROM whatsmeow_device WHERE jid=@p1`
+	deleteMessageNodes = `DELETE FROM whatsapp_message_node WHERE our_jid=@p1`
 )
 
 // NewDevice creates a new device in this database.
@@ -408,5 +409,15 @@ func (c *Container) DeleteDevice(store *store.Device) error {
 		return ErrDeviceIDMustBeSet
 	}
 	_, err := c.db.Exec(deleteDeviceQuery, store.ID.String())
+	return err
+}
+
+func (c *Container) DeleteMessageNode(store *store.Device) error {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	if store.ID == nil {
+		return ErrDeviceIDMustBeSet
+	}
+	_, err := c.db.Exec(deleteMessageNodes, store.ID.String())
 	return err
 }

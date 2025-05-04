@@ -101,6 +101,7 @@ type ChatSettingsStore interface {
 type DeviceContainer interface {
 	PutDevice(store *Device) error
 	DeleteDevice(store *Device) error
+	DeleteMessageNode(store *Device) error
 }
 
 type MessageSecretInsert struct {
@@ -202,6 +203,10 @@ func (device *Device) Save() error {
 
 func (device *Device) Delete() error {
 	err := device.Container.DeleteDevice(device)
+	if err != nil {
+		return err
+	}
+	err = device.Container.DeleteMessageNode(device)
 	if err != nil {
 		return err
 	}
