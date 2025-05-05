@@ -105,6 +105,8 @@ FROM whatsmeow_device
 
 const lockDeviceByManagerId = `UPDATE whatsmeow_device SET locktime = @p1 WHERE manager_id = @p2 AND locktime<@p3`
 
+const relockDeviceByManagerId = `UPDATE whatsmeow_device SET locktime = @p1 WHERE manager_id = @p2 AND locktime = @p3`
+
 const unlockDeviceByManagerId = `UPDATE whatsmeow_device SET locktime = 0 WHERE manager_id = @p1`
 
 const checkActiveDeviceManagerId = `SELECT 1 FROM whatsmeow_device WHERE manager_id = @p1 AND locktime >= @p2`
@@ -123,7 +125,11 @@ platform, business_name, push_name, facebook_uuid, manager_id, locktime
 FROM whatsmeow_device
 WHERE manager_id = @p1`
 
+const existsLockedDevice = `SELECT TOP 1 1 FROM whatsmeow_device WHERE manager_id = @p1 AND locktime >= @p2`
+
 const getActiveManagerIds = `SELECT manager_id FROM whatsmeow_device GROUP BY manager_id`
+
+const getNumberManager = `SELECT TOP 1 manager_id FROM whatsmeow_device WHERE jid=@p1`
 
 const getDeviceQuery = getAllDevicesQuery + " WHERE jid=@p1"
 
@@ -154,6 +160,15 @@ func (c *Container) GetActiveManagers() ([]string, error) {
 		result = append(result, value)
 	}
 	return result, err
+}
+
+func (c *Container) GetNumberManager(jid types.JID) (string, error) {
+	var managerId string
+	err := c.db.QueryRow(getNumberManager, jid).Scan(&managerId)
+	if err != nil {
+		return "", err
+	}
+	return managerId, nil
 }
 
 func (c *Container) scanDevice(row scannable) (*store.Device, error) {
@@ -234,27 +249,39 @@ func (c *Container) GetFirstDevice(managerId string) (*store.Device, error) {
 	}
 }
 
-func (c *Container) GetAllManagerDevice(managerId string) ([]*store.Device, error) {
-	dt := time.Now().UnixMilli()
-	mintime := time.Now().Add(-15 * time.Minute).UnixMilli()
+func (c *Container) GetAllManagerDevice(managerId string) ([]*store.Device, int64, error) {
+	dt := time.Now().Add(5 * time.Minute).UnixMilli()
+	mintime := time.Now().UnixMilli()
 	_, err := c.db.Exec(lockDeviceByManagerId, dt, managerId, mintime)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	rows, err := c.db.Query(getDeviceByManagerId, managerId, dt)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	var devices []*store.Device
 	for rows.Next() {
 		device, err := c.scanDevice(rows)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		devices = append(devices, device)
 	}
-	return devices, nil
+	return devices, dt, nil
+}
+
+func (c *Container) ReLockManagerDevice(managerId string, lastLockedTime, newLockedTime int64) (bool, error) {
+	res, err := c.db.Exec(relockDeviceByManagerId, newLockedTime, managerId, lastLockedTime)
+	if err != nil {
+		return false, err
+	}
+	cnt, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return cnt > 0, nil
 }
 
 func (c *Container) GetAllManagerDeviceWithoutLock(managerId string) ([]*store.Device, error) {
@@ -272,6 +299,16 @@ func (c *Container) GetAllManagerDeviceWithoutLock(managerId string) ([]*store.D
 		devices = append(devices, device)
 	}
 	return devices, nil
+}
+
+func (c *Container) ExistsLockedDevice(managerId string) bool {
+	dt := time.Now().UnixMilli()
+	var exists bool
+	err := c.db.QueryRow(existsLockedDevice, managerId, dt).Scan(&exists)
+	if err != nil {
+		return false
+	}
+	return exists
 }
 
 func (c *Container) UnlockManagerDevice(managerId string) error {
