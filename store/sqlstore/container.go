@@ -249,8 +249,8 @@ func (c *Container) GetFirstDevice(managerId string) (*store.Device, error) {
 	}
 }
 
-func (c *Container) GetAllManagerDevice(managerId string) ([]*store.Device, int64, error) {
-	dt := time.Now().Add(5 * time.Minute).UnixMilli()
+func (c *Container) GetAllManagerDevice(managerId string, lockTime int) ([]*store.Device, int64, error) {
+	dt := time.Now().Add(time.Duration(lockTime) * time.Minute).UnixMilli()
 	mintime := time.Now().UnixMilli()
 	_, err := c.db.Exec(lockDeviceByManagerId, dt, managerId, mintime)
 	if err != nil {
