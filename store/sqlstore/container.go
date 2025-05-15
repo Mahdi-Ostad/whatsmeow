@@ -107,7 +107,7 @@ const lockDeviceByManagerId = `UPDATE whatsmeow_device SET locktime = @p1 WHERE 
 
 const relockDeviceByManagerId = `UPDATE whatsmeow_device SET locktime = @p1 WHERE manager_id = @p2 AND locktime = @p3`
 
-const unlockDeviceByManagerId = `UPDATE whatsmeow_device SET locktime = 0 WHERE manager_id = @p1`
+const unlockDeviceByManagerId = `UPDATE whatsmeow_device SET locktime = 0 WHERE manager_id = @p1 AND locktime = @p2`
 
 const checkActiveDeviceManagerId = `SELECT 1 FROM whatsmeow_device WHERE manager_id = @p1 AND locktime >= @p2`
 
@@ -311,8 +311,8 @@ func (c *Container) ExistsLockedDevice(managerId string) bool {
 	return exists
 }
 
-func (c *Container) UnlockManagerDevice(managerId string) error {
-	_, err := c.db.Exec(unlockDeviceByManagerId, managerId)
+func (c *Container) UnlockManagerDevice(managerId string, lastLock int64) error {
+	_, err := c.db.Exec(unlockDeviceByManagerId, managerId, lastLock)
 	return err
 }
 
