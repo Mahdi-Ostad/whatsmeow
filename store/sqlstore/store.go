@@ -426,19 +426,31 @@ const (
 		WHEN NOT MATCHED THEN
     		INSERT (our_jid, their_id, session)
     		VALUES (source.our_jid, source.their_id, source.session);`
-	sqliteDeleteAllSenderKeysQuery      = `DELETE FROM whatsmeow_sender_keys WHERE our_jid=$1 AND sender_id LIKE $2`
-	mssqlDeleteAllSenderKeysQuery       = `DELETE FROM whatsmeow_sender_keys WHERE our_jid=@p1 AND sender_id LIKE @p2`
-	sqliteMigratePNToLIDSenderKeysQuery = `
-	deleteAllIdentityKeysQuery      = `DELETE FROM whatsmeow_identity_keys WHERE our_jid=$1 AND sender_id LIKE $2`
-	migratePNToLIDIdentityKeysQuery = `
+	sqliteDeleteAllSenderKeysQuery        = `DELETE FROM whatsmeow_sender_keys WHERE our_jid=$1 AND sender_id LIKE $2`
+	mssqlDeleteAllSenderKeysQuery         = `DELETE FROM whatsmeow_sender_keys WHERE our_jid=@p1 AND sender_id LIKE @p2`
+	sqliteDeleteAllIdentityKeysQuery      = `DELETE FROM whatsmeow_identity_keys WHERE our_jid=$1 AND sender_id LIKE $2`
+	mssqlDeleteAllIdentityKeysQuery       = `DELETE FROM whatsmeow_identity_keys WHERE our_jid=@p1 AND sender_id LIKE @p2`
+	sqliteMigratePNToLIDIdentityKeysQuery = `
 		INSERT INTO whatsmeow_identity_keys (our_jid, their_id, identity)
 		SELECT $1, replace(their_id, $2, $3), identity
 		FROM whatsmeow_identity_keys
 		WHERE our_jid=$1 AND their_id LIKE $2 || ':%'
 		ON CONFLICT (our_jid, their_id) DO UPDATE SET identity=excluded.identity
 	`
-	deleteAllSenderKeysQuery      = `DELETE FROM whatsmeow_sender_keys WHERE our_jid=$1 AND sender_id LIKE $2`
-	migratePNToLIDSenderKeysQuery = `
+	mssqlMigratePNToLIDIdentityKeysQuery = `
+		MERGE INTO whatsmeow_identity_keys AS target
+		USING (
+    		SELECT @p1 AS our_jid, REPLACE(their_id, @p2, @p3) AS their_id, identity
+    		FROM whatsmeow_identity_keys
+    		WHERE our_jid = @p1 AND their_id LIKE @p2 + ':%'
+		) AS source
+		ON target.our_jid = source.our_jid AND target.their_id = source.their_id
+		WHEN MATCHED THEN
+    		UPDATE SET identity = source.identity
+		WHEN NOT MATCHED THEN
+    		INSERT (our_jid, their_id, identity)
+    		VALUES (source.our_jid, source.their_id, source.identity);`
+	sqliteMigratePNToLIDSenderKeysQuery = `
 		INSERT INTO whatsmeow_sender_keys (our_jid, chat_id, sender_id, sender_key)
 		SELECT $1, chat_id, replace(sender_id, $2, $3), sender_key
 		FROM whatsmeow_sender_keys
@@ -523,7 +535,11 @@ func (s *SQLStore) deleteAllSenderKeys(ctx context.Context, phone string) error 
 }
 
 func (s *SQLStore) deleteAllIdentityKeys(ctx context.Context, phone string) error {
-	_, err := s.db.Exec(ctx, deleteAllIdentityKeysQuery, s.JID, phone+":%")
+	if s.db.Dialect == dbutil.MSSQL {
+		_, err := s.db.Exec(ctx, mssqlDeleteAllIdentityKeysQuery, s.JID, phone+":%")
+		return err
+	}
+	_, err := s.db.Exec(ctx, sqliteDeleteAllIdentityKeysQuery, s.JID, phone+":%")
 	return err
 }
 
@@ -569,12 +585,18 @@ func (s *SQLStore) MigratePNToLID(ctx context.Context, pn, lid types.JID) error 
 		} else {
 			res, err = s.db.Exec(ctx, sqliteMigratePNToLIDSenderKeysQuery, s.JID, pnSignal, lidSignal)
 		}
-
-
-		res, err = s.db.Exec(ctx, migratePNToLIDIdentityKeysQuery, s.JID, pnSignal, lidSignal)
-		if err != nil {
-			return fmt.Errorf("failed to migrate identity keys: %w", err)
+		if s.db.Dialect == dbutil.MSSQL {
+			res, err = s.db.Exec(ctx, mssqlMigratePNToLIDIdentityKeysQuery, s.JID, pnSignal, lidSignal)
+			if err != nil {
+				return fmt.Errorf("failed to migrate identity keys: %w", err)
+			}
+		} else {
+			res, err = s.db.Exec(ctx, sqliteMigratePNToLIDIdentityKeysQuery, s.JID, pnSignal, lidSignal)
+			if err != nil {
+				return fmt.Errorf("failed to migrate identity keys: %w", err)
+			}
 		}
+
 		identityKeysUpdated, err = res.RowsAffected()
 		if err != nil {
 			return fmt.Errorf("failed to get rows affected for identity keys: %w", err)
@@ -584,10 +606,6 @@ func (s *SQLStore) MigratePNToLID(ctx context.Context, pn, lid types.JID) error 
 			return fmt.Errorf("failed to delete extra identity keys: %w", err)
 		}
 
-		res, err = s.db.Exec(ctx, migratePNToLIDSenderKeysQuery, s.JID, pnSignal, lidSignal)
-		if err != nil {
-			return fmt.Errorf("failed to migrate sender keys: %w", err)
-		}
 		senderKeysUpdated, err = res.RowsAffected()
 		if err != nil {
 			return fmt.Errorf("failed to get rows affected for sender keys: %w", err)
