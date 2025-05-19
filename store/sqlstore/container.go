@@ -32,6 +32,8 @@ type Container struct {
 	db                   *RetryDB
 	log                  waLog.Logger
 	mutex                sync.Mutex
+	LIDMap *CachedLIDMap
+
 	DatabaseErrorHandler func(device *store.Device, action string, attemptIndex int, err error) (retry bool)
 }
 
@@ -97,8 +99,9 @@ func NewWithWrappedDB(wrapped *RetryDB, log waLog.Logger) *Container {
 		log = waLog.Noop
 	}
 	return &Container{
-		db:  wrapped,
-		log: log,
+		db:     wrapped,
+		log:    log,
+		LIDMap: NewCachedLIDMap(wrapped),
 	}
 }
 
@@ -227,6 +230,7 @@ func (c *Container) scanDevice(row dbutil.Scannable) (*store.Device, error) {
 	device.MsgSecrets = innerStore
 	device.PrivacyTokens = innerStore
 	device.PrekeysCache = innerStore
+	device.LIDs = c.LIDMap
 	device.Container = c
 	device.Initialized = true
 

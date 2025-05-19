@@ -1,4 +1,4 @@
--- v0 -> v7 (compatible with v6+): Latest schema
+-- v0 -> v8 (compatible with v6+): Latest schema
 CREATE TABLE whatsmeow_device (
 	jid VARCHAR(300) PRIMARY KEY ,
 	lid VARCHAR(300),
@@ -119,4 +119,9 @@ CREATE TABLE whatsmeow_privacy_tokens (
 	token     VARBINARY(max)  NOT NULL,
 	timestamp_info BIGINT NOT NULL,
 	PRIMARY KEY (our_jid, their_jid)
+);
+
+CREATE TABLE whatsmeow_lid_map (
+	lid TEXT PRIMARY KEY,
+	pn  TEXT UNIQUE NOT NULL
 );

@@ -319,7 +319,7 @@ func singlePutMessageSecret(update putMessageSecretUpdate) (err error) {
 	return
 }
 
-var _ store.AllStores = (*SQLStore)(nil)
+var _ store.AllSessionSpecificStores = (*SQLStore)(nil)
 
 const (
 	mssqlPutIdentityQuery = `

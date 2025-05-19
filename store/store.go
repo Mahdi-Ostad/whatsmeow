@@ -8,6 +8,7 @@
 package store
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -128,7 +129,19 @@ type PrivacyTokenStore interface {
 	GetPrivacyToken(user types.JID) (*PrivacyToken, error)
 }
 
-type AllStores interface {
+type LIDMapping struct {
+	LID types.JID
+	PN  types.JID
+}
+
+type LIDStore interface {
+	PutManyLIDMappings(ctx context.Context, mappings []LIDMapping) error
+	PutLIDMapping(ctx context.Context, lid, jid types.JID) error
+	GetPNForLID(ctx context.Context, lid types.JID) (types.JID, error)
+	GetLIDForPN(ctx context.Context, pn types.JID) (types.JID, error)
+}
+
+type AllSessionSpecificStores interface {
 	IdentityStore
 	SessionStore
 	PreKeyStore
@@ -150,6 +163,15 @@ type PrekeysCacheStore interface {
 	GetMessageNodesByUser(user string) (map[int]waBinary.Node, error)
 	GetMessageNodesByGroup(group string) (map[int]waBinary.Node, error)
 	DeleteMessageNode(ref int) error
+}
+
+type AllGlobalStores interface {
+	LIDStore
+}
+
+type AllStores interface {
+	AllSessionSpecificStores
+	AllGlobalStores
 }
 
 type Device struct {
@@ -182,6 +204,7 @@ type Device struct {
 	MsgSecrets           MsgSecretStore
 	PrivacyTokens        PrivacyTokenStore
 	PrekeysCache         PrekeysCacheStore
+	LIDs          LIDStore
 	Container            DeviceContainer
 	ManagerId            string
 	LockTime             int64
@@ -196,6 +219,24 @@ func (device *Device) handleDatabaseError(attemptIndex int, err error, action st
 	}
 	device.Log.Errorf("Failed to %s: %v", fmt.Sprintf(action, args...), err)
 	return false
+}
+
+func (device *Device) GetJID() types.JID {
+	if device == nil {
+		return types.EmptyJID
+	}
+	id := device.ID
+	if id == nil {
+		return types.EmptyJID
+	}
+	return *id
+}
+
+func (device *Device) GetLID() types.JID {
+	if device == nil {
+		return types.EmptyJID
+	}
+	return device.LID
 }
 
 func (device *Device) Save() error {
