@@ -20,8 +20,8 @@ import (
 
 	mssql "github.com/denisenkom/go-mssqldb"
 	"go.mau.fi/util/dbutil"
-	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/util/exsync"
+	waBinary "go.mau.fi/whatsmeow/binary"
 
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
@@ -405,24 +405,49 @@ const (
 		INSERT INTO whatsmeow_sessions (our_jid, their_id, session) VALUES (@p1, @p2, @p3)
 		ON CONFLICT (our_jid, their_id) DO UPDATE SET session=excluded.session
 	`
-	deleteAllSessionsQuery = `DELETE FROM whatsmeow_sessions WHERE our_jid=$1 AND their_id LIKE $2`
-	deleteSessionQuery     = `DELETE FROM whatsmeow_sessions WHERE our_jid=$1 AND their_id=$2`
 
-	migratePNToLIDSessionsQuery = `
+	sqliteMigratePNToLIDSessionsQuery = `
 		INSERT INTO whatsmeow_sessions (our_jid, their_id, session)
 		SELECT $1, replace(their_id, $2, $3), session
 		FROM whatsmeow_sessions
 		WHERE our_jid=$1 AND their_id LIKE $2 || ':%'
 		ON CONFLICT (our_jid, their_id) DO UPDATE SET session=excluded.session
 	`
-	deleteAllSenderKeysQuery      = `DELETE FROM whatsmeow_sender_keys WHERE our_jid=$1 AND sender_id LIKE $2`
-	migratePNToLIDSenderKeysQuery = `
+	mssqlMigratePNToLIDSessionsQuery = `
+		MERGE INTO whatsmeow_sessions AS target
+		USING (
+    		SELECT @p1 AS our_jid, REPLACE(their_id, @p2, @p3) AS their_id, session
+    		FROM whatsmeow_sessions
+    		WHERE our_jid = @p1 AND their_id LIKE @p2 + ':%'
+		) AS source
+		ON target.our_jid = source.our_jid AND target.their_id = source.their_id
+		WHEN MATCHED THEN
+    		UPDATE SET session = source.session
+		WHEN NOT MATCHED THEN
+    		INSERT (our_jid, their_id, session)
+    		VALUES (source.our_jid, source.their_id, source.session);`
+	sqliteDeleteAllSenderKeysQuery      = `DELETE FROM whatsmeow_sender_keys WHERE our_jid=$1 AND sender_id LIKE $2`
+	mssqlDeleteAllSenderKeysQuery       = `DELETE FROM whatsmeow_sender_keys WHERE our_jid=@p1 AND sender_id LIKE @p2`
+	sqliteMigratePNToLIDSenderKeysQuery = `
 		INSERT INTO whatsmeow_sender_keys (our_jid, chat_id, sender_id, sender_key)
 		SELECT $1, chat_id, replace(sender_id, $2, $3), sender_key
 		FROM whatsmeow_sender_keys
 		WHERE our_jid=$1 AND sender_id LIKE $2 || ':%'
 		ON CONFLICT (our_jid, chat_id, sender_id) DO UPDATE SET sender_key=excluded.sender_key
 	`
+	mssqlMigratePNToLIDSenderKeysQuery = `
+		MERGE INTO whatsmeow_sender_keys AS target
+		USING (
+    		SELECT @p1 AS our_jid, chat_id, REPLACE(sender_id, @p2, @p3) AS sender_id, sender_key
+    		FROM whatsmeow_sender_keys
+    		WHERE our_jid = @p1 AND sender_id LIKE @p2 + ':%'
+		) AS source
+		ON target.our_jid = source.our_jid AND target.chat_id = source.chat_id AND target.sender_id = source.sender_id
+		WHEN MATCHED THEN
+    		UPDATE SET sender_key = source.sender_key
+		WHEN NOT MATCHED THEN
+    		INSERT (our_jid, chat_id, sender_id, sender_key)
+    		VALUES (source.our_jid, source.chat_id, source.sender_id, source.sender_key);`
 	mssqlPutSessionQuery = `
 	MERGE INTO whatsmeow_sessions AS target
 	USING (VALUES (@p1, @p2, @p3)) AS source (our_jid, their_id, session)
@@ -479,7 +504,11 @@ func (s *SQLStore) deleteAllSessions(ctx context.Context, phone string) error {
 }
 
 func (s *SQLStore) deleteAllSenderKeys(ctx context.Context, phone string) error {
-	_, err := s.db.Exec(ctx, deleteAllSenderKeysQuery, s.JID, phone+":%")
+	if s.db.Dialect == dbutil.MSSQL {
+		_, err := s.db.Exec(ctx, mssqlDeleteAllSenderKeysQuery, s.JID, phone+":%")
+		return err
+	}
+	_, err := s.db.Exec(ctx, sqliteDeleteAllSenderKeysQuery, s.JID, phone+":%")
 	return err
 }
 
@@ -502,7 +531,13 @@ func (s *SQLStore) MigratePNToLID(ctx context.Context, pn, lid types.JID) error 
 	var sessionsUpdated, senderKeysUpdated int64
 	lidSignal := lid.SignalAddressUser()
 	err := s.db.DoTxn(ctx, nil, func(ctx context.Context) error {
-		res, err := s.db.Exec(ctx, migratePNToLIDSessionsQuery, s.JID, pnSignal, lidSignal)
+		var res sql.Result
+		var err error
+		if s.db.Dialect == dbutil.MSSQL {
+			res, err = s.db.Exec(ctx, mssqlMigratePNToLIDSessionsQuery, s.JID, pnSignal, lidSignal)
+		} else {
+			res, err = s.db.Exec(ctx, sqliteMigratePNToLIDSessionsQuery, s.JID, pnSignal, lidSignal)
+		}
 		if err != nil {
 			return fmt.Errorf("failed to migrate sessions: %w", err)
 		}
@@ -514,7 +549,12 @@ func (s *SQLStore) MigratePNToLID(ctx context.Context, pn, lid types.JID) error 
 		if err != nil {
 			return fmt.Errorf("failed to delete extra sessions: %w", err)
 		}
-		res, err = s.db.Exec(ctx, migratePNToLIDSenderKeysQuery, s.JID, pnSignal, lidSignal)
+		if s.db.Dialect == dbutil.MSSQL {
+			res, err = s.db.Exec(ctx, mssqlMigratePNToLIDSenderKeysQuery, s.JID, pnSignal, lidSignal)
+		} else {
+			res, err = s.db.Exec(ctx, sqliteMigratePNToLIDSenderKeysQuery, s.JID, pnSignal, lidSignal)
+		}
+
 		if err != nil {
 			return fmt.Errorf("failed to migrate sender keys: %w", err)
 		}
