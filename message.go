@@ -323,6 +323,13 @@ func (cli *Client) handlePlaintextMessage(info *types.MessageInfo, node *waBinar
 	cli.dispatchEvent(evt.UnwrapRaw())
 }
 
+func (cli *Client) migrateSessionStore(pn, lid types.JID) {
+	err := cli.Store.Sessions.MigratePNToLID(context.TODO(), pn, lid)
+	if err != nil {
+		cli.Log.Errorf("Failed to migrate signal store from %s to %s: %v", pn, lid, err)
+	}
+}
+
 type timeStamping struct {
 	duration time.Duration
 	tag      string
@@ -345,6 +352,21 @@ func (cli *Client) decryptMessages(info *types.MessageInfo, node *waBinary.Node)
 	containsDirectMsg := false
 	durations := []timeStamping{}
 	var start time.Time
+	senderEncryptionJID := info.Sender
+	if info.Sender.Server == types.DefaultUserServer && !info.Sender.IsBot() {
+		if info.SenderAlt.Server == types.HiddenUserServer {
+			senderEncryptionJID = info.SenderAlt
+			cli.migrateSessionStore(info.Sender, info.SenderAlt)
+		} else if lid, err := cli.Store.LIDs.GetLIDForPN(context.TODO(), info.Sender); err != nil {
+			cli.Log.Errorf("Failed to get LID for %s: %v", info.Sender, err)
+		} else if !lid.IsEmpty() {
+			cli.migrateSessionStore(info.Sender, lid)
+			senderEncryptionJID = lid
+			info.SenderAlt = lid
+		} else {
+			cli.Log.Warnf("No LID found for %s", info.Sender)
+		}
+	}
 	for _, child := range children {
 		if child.Tag != "enc" {
 			continue
@@ -359,13 +381,13 @@ func (cli *Client) decryptMessages(info *types.MessageInfo, node *waBinary.Node)
 		if encType == "pkmsg" || encType == "msg" {
 			//Section 1
 			start = time.Now()
-			decrypted, err = cli.decryptDM(&child, info.Sender, encType == "pkmsg")
+			decrypted, err = cli.decryptDM(&child, senderEncryptionJID, encType == "pkmsg")
 			containsDirectMsg = true
 			durations = append(durations, timeStamping{time.Since(start), encType, 1})
 		} else if info.IsGroup && encType == "skmsg" {
 			//Section 2
 			start = time.Now()
-			decrypted, err = cli.decryptGroupMsg(&child, info.Sender, info.Chat)
+			decrypted, err = cli.decryptGroupMsg(&child, senderEncryptionJID, info.Chat)
 			durations = append(durations, timeStamping{time.Since(start), child.Tag, 2})
 		} else if encType == "msmsg" && info.Sender.IsBot() {
 			start = time.Now()
@@ -373,7 +395,7 @@ func (cli *Client) decryptMessages(info *types.MessageInfo, node *waBinary.Node)
 			messageSecretSenderJID := targetSenderJID
 			if targetSenderJID.User == "" {
 				if info.Sender.Server == types.BotServer {
-					targetSenderJID = cli.Store.LID
+					targetSenderJID = cli.Store.GetLID()
 				} else {
 					targetSenderJID = cli.getOwnID()
 				}
@@ -475,7 +497,10 @@ func (cli *Client) clearUntrustedIdentity(target types.JID) {
 }
 
 func (cli *Client) decryptDM(child *waBinary.Node, from types.JID, isPreKey bool) ([]byte, error) {
-	content, _ := child.Content.([]byte)
+	content, ok := child.Content.([]byte)
+	if !ok {
+		return nil, fmt.Errorf("message content is not a byte slice")
+	}
 
 	builder := session.NewBuilderFromSignal(cli.Store, from.SignalAddress(), pbSerializer)
 	cipher := session.NewCipher(builder, from.SignalAddress())
@@ -511,7 +536,10 @@ func (cli *Client) decryptDM(child *waBinary.Node, from types.JID, isPreKey bool
 }
 
 func (cli *Client) decryptGroupMsg(child *waBinary.Node, from types.JID, chat types.JID) ([]byte, error) {
-	content, _ := child.Content.([]byte)
+	content, ok := child.Content.([]byte)
+	if !ok {
+		return nil, fmt.Errorf("message content is not a byte slice")
+	}
 
 	senderKeyName := protocol.NewSenderKeyName(chat.String(), from.SignalAddress())
 	builder := groups.NewGroupSessionBuilder(cli.Store, pbSerializer)
@@ -702,7 +730,11 @@ func (cli *Client) processProtocolParts(info *types.MessageInfo, msg *waE2E.Mess
 		if !info.IsGroup {
 			cli.Log.Warnf("Got sender key distribution message in non-group chat from %s", info.Sender)
 		} else {
-			cli.handleSenderKeyDistributionMessage(info.Chat, info.Sender, msg.SenderKeyDistributionMessage.AxolotlSenderKeyDistributionMessage)
+			encryptionIdentity := info.Sender
+			if encryptionIdentity.Server == types.DefaultUserServer && info.SenderAlt.Server == types.HiddenUserServer {
+				encryptionIdentity = info.SenderAlt
+			}
+			cli.handleSenderKeyDistributionMessage(info.Chat, encryptionIdentity, msg.SenderKeyDistributionMessage.AxolotlSenderKeyDistributionMessage)
 		}
 	}
 	// N.B. Edits are protocol messages, but they're also wrapped inside EditedMessage,
