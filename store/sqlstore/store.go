@@ -14,14 +14,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	mssql "github.com/denisenkom/go-mssqldb"
-	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/util/dbutil"
+	waBinary "go.mau.fi/whatsmeow/binary"
 
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
@@ -142,7 +141,7 @@ func ManageContacts(logger waLog.Logger) {
 }
 
 func bulkInsertContacts(update contactUpdate) error {
-	tx, err := update.sqlStore.db.Begin()
+	tx, err := update.sqlStore.db.RawDB.Begin()
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
@@ -212,11 +211,11 @@ func ManageSenderKeys() {
 func manageSingleSenderKey(senderkeyUpdate senderkeyUpdate) error {
 	senderkeyUpdate.sqlStore.mutex.Lock()
 	defer senderkeyUpdate.sqlStore.mutex.Unlock()
-	if senderkeyUpdate.sqlStore.dialect == "sqlserver" {
-		_, err := senderkeyUpdate.sqlStore.db.Exec(mssqlPutSenderKeyQuery, senderkeyUpdate.sqlStore.JID, senderkeyUpdate.group, senderkeyUpdate.user, senderkeyUpdate.session)
+	if senderkeyUpdate.sqlStore.db.Dialect == dbutil.MSSQL {
+		_, err := senderkeyUpdate.sqlStore.db.Exec(context.TODO(), mssqlPutSenderKeyQuery, senderkeyUpdate.sqlStore.JID, senderkeyUpdate.group, senderkeyUpdate.user, senderkeyUpdate.session)
 		return err
 	}
-	_, err := senderkeyUpdate.sqlStore.db.Exec(sqlitePutSenderKeyQuery, senderkeyUpdate.sqlStore.JID, senderkeyUpdate.group, senderkeyUpdate.user, senderkeyUpdate.session)
+	_, err := senderkeyUpdate.sqlStore.db.Exec(context.TODO(), sqlitePutSenderKeyQuery, senderkeyUpdate.sqlStore.JID, senderkeyUpdate.group, senderkeyUpdate.user, senderkeyUpdate.session)
 	return err
 }
 
@@ -237,10 +236,10 @@ func ManageSessions(logger waLog.Logger) {
 func putSingleSession(update sessionUpdate) (err error) {
 	update.sqlStore.mutex.Lock()
 	defer update.sqlStore.mutex.Unlock()
-	if update.sqlStore.dialect == "sqlserver" {
-		_, err = update.sqlStore.db.Exec(mssqlPutSessionQuery, update.sqlStore.JID, update.address, update.session)
+	if update.sqlStore.db.Dialect == dbutil.MSSQL {
+		_, err = update.sqlStore.db.Exec(context.TODO(), mssqlPutSessionQuery, update.sqlStore.JID, update.address, update.session)
 	} else {
-		_, err = update.sqlStore.db.Exec(sqlitePutSessionQuery, update.sqlStore.JID, update.address, update.session)
+		_, err = update.sqlStore.db.Exec(context.TODO(), sqlitePutSessionQuery, update.sqlStore.JID, update.address, update.session)
 	}
 	return err
 }
@@ -248,7 +247,7 @@ func putSingleSession(update sessionUpdate) (err error) {
 func deleteSingleSession(update sessionUpdate) (err error) {
 	update.sqlStore.mutex.Lock()
 	defer update.sqlStore.mutex.Unlock()
-	_, err = update.sqlStore.db.Exec(deleteSessionQuery, update.sqlStore.JID, update.address)
+	_, err = update.sqlStore.db.Exec(context.TODO(), deleteSessionQuery, update.sqlStore.JID, update.address)
 	return err
 }
 
@@ -269,18 +268,18 @@ func ManageIdentities(logger waLog.Logger) {
 func putSingleIdentity(update identityUpdate) (err error) {
 	update.sqlStore.mutex.Lock()
 	defer update.sqlStore.mutex.Unlock()
-	if update.sqlStore.dialect == "sqlserver" {
-		_, err := update.sqlStore.db.Exec(mssqlPutIdentityQuery, update.sqlStore.JID, update.address, update.key[:])
+	if update.sqlStore.db.Dialect == dbutil.MSSQL {
+		_, err := update.sqlStore.db.Exec(context.TODO(), mssqlPutIdentityQuery, update.sqlStore.JID, update.address, update.key[:])
 		return err
 	}
-	_, err = update.sqlStore.db.Exec(sqlitePutIdentityQuery, update.sqlStore.JID, update.address, update.key[:])
+	_, err = update.sqlStore.db.Exec(context.TODO(), sqlitePutIdentityQuery, update.sqlStore.JID, update.address, update.key[:])
 	return err
 }
 
 func deleteSingleIdentity(update identityUpdate) (err error) {
 	update.sqlStore.mutex.Lock()
 	defer update.sqlStore.mutex.Unlock()
-	_, err = update.sqlStore.db.Exec(deleteAllIdentitiesQuery, update.sqlStore.JID, update.address)
+	_, err = update.sqlStore.db.Exec(context.TODO(), deleteAllIdentitiesQuery, update.sqlStore.JID, update.address)
 	return err
 }
 
@@ -296,7 +295,7 @@ func ManageRemovingPreKeys(logger waLog.Logger) {
 func singleRemovePreKey(update removePreKeyUpdate) (err error) {
 	update.sqlStore.mutex.Lock()
 	defer update.sqlStore.mutex.Unlock()
-	_, err = update.sqlStore.db.Exec(deletePreKeyQuery, update.sqlStore.JID, update.id)
+	_, err = update.sqlStore.db.Exec(context.TODO(), deletePreKeyQuery, update.sqlStore.JID, update.id)
 	return err
 }
 
@@ -312,11 +311,11 @@ func ManagePutMessageSecret(logger waLog.Logger) {
 func singlePutMessageSecret(update putMessageSecretUpdate) (err error) {
 	update.sqlStore.mutex.Lock()
 	defer update.sqlStore.mutex.Unlock()
-	if update.sqlStore.dialect == "sqlserver" {
-		_, err = update.sqlStore.db.Exec(mssqlPutMsgSecret, update.sqlStore.JID, update.chat.ToNonAD(), update.sender.ToNonAD(), update.id, update.secret)
+	if update.sqlStore.db.Dialect == dbutil.MSSQL {
+		_, err = update.sqlStore.db.Exec(context.TODO(), mssqlPutMsgSecret, update.sqlStore.JID, update.chat.ToNonAD(), update.sender.ToNonAD(), update.id, update.secret)
 		return
 	}
-	_, err = update.sqlStore.db.Exec(sqlitePutMsgSecret, update.sqlStore.JID, update.chat.ToNonAD(), update.sender.ToNonAD(), update.id, update.secret)
+	_, err = update.sqlStore.db.Exec(context.TODO(), sqlitePutMsgSecret, update.sqlStore.JID, update.chat.ToNonAD(), update.sender.ToNonAD(), update.id, update.secret)
 	return
 }
 
@@ -376,7 +375,7 @@ func (s *SQLStore) IsTrustedIdentity(address string, key [32]byte) (bool, error)
 	defer s.mutex.Unlock()
 	var existingIdentity []byte
 	var err error
-	if s.dialect == "sqlserver" {
+	if s.db.Dialect == dbutil.MSSQL {
 		err = s.db.QueryRow(context.TODO(), mssqlGetIdentityQuery, s.JID, address).Scan(&existingIdentity)
 	} else {
 		err = s.db.QueryRow(context.TODO(), sqliteGetIdentityQuery, s.JID, address).Scan(&existingIdentity)
@@ -424,7 +423,7 @@ func (s *SQLStore) GetSession(address string) (session []byte, err error) {
 }
 
 func (s *SQLStore) HasSession(address string) (has bool, err error) {
-	if s.dialect == "sqlserver" {
+	if s.db.Dialect == dbutil.MSSQL {
 		err = s.db.QueryRow(context.TODO(), mssqlHasSessionQuery, s.JID, address).Scan(&has)
 	} else {
 		err = s.db.QueryRow(context.TODO(), sqliteHasSessionQuery, s.JID, address).Scan(&has)
@@ -483,7 +482,7 @@ func (s *SQLStore) genOnePreKey(id uint32, markUploaded bool) (*keys.PreKey, err
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	var err error
-	if s.dialect == "sqlserver" {
+	if s.db.Dialect == dbutil.MSSQL {
 		_, err = s.db.Exec(context.TODO(), mssqlInsertPreKeyQuery, s.JID, key.KeyID, key.Priv[:], markUploaded)
 	} else {
 		_, err = s.db.Exec(context.TODO(), sqliteInsertPreKeyQuery, s.JID, key.KeyID, key.Priv[:], markUploaded)
@@ -515,8 +514,8 @@ func (s *SQLStore) GetOrGenPreKeys(count uint32) ([]*keys.PreKey, error) {
 	s.preKeyLock.Lock()
 	defer s.preKeyLock.Unlock()
 	var err error
-	var res *sql.Rows
-	if s.dialect == "sqlserver" {
+	var res dbutil.Rows
+	if s.db.Dialect == dbutil.MSSQL {
 		res, err = s.db.Query(context.TODO(), mssqlGetUnuploadedPreKeysQuery, count, s.JID)
 	} else {
 		res, err = s.db.Query(context.TODO(), sqliteGetUnuploadedPreKeysQuery, s.JID, count)
@@ -573,7 +572,7 @@ func scanPreKey(row dbutil.Scannable) (*keys.PreKey, error) {
 }
 
 func (s *SQLStore) GetPreKey(id uint32) (*keys.PreKey, error) {
-	if s.dialect == "sqlserver" {
+	if s.db.Dialect == dbutil.MSSQL {
 		return scanPreKey(s.db.QueryRow(context.TODO(), mssqlGetPreKeyQuery, s.JID, id))
 	}
 	return scanPreKey(s.db.QueryRow(context.TODO(), sqliteGetPreKeyQuery, s.JID, id))
@@ -592,7 +591,7 @@ func (s *SQLStore) RemovePreKey(id uint32) error {
 func (s *SQLStore) MarkPreKeysAsUploaded(upToID uint32) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	if s.dialect == "sqlserver" {
+	if s.db.Dialect == dbutil.MSSQL {
 		_, err := s.db.Exec(context.TODO(), mssqlMarkPreKeysAsUploadedQuery, s.JID, upToID)
 		return err
 	}
@@ -601,7 +600,7 @@ func (s *SQLStore) MarkPreKeysAsUploaded(upToID uint32) error {
 }
 
 func (s *SQLStore) UploadedPreKeyCount() (count int, err error) {
-	if s.dialect == "sqlserver" {
+	if s.db.Dialect == dbutil.MSSQL {
 		err = s.db.QueryRow(context.TODO(), mssqlGetUploadedPreKeyCountQuery, s.JID).Scan(&count)
 		return
 	}
@@ -673,7 +672,7 @@ const (
 func (s *SQLStore) PutAppStateSyncKey(id []byte, key store.AppStateSyncKey) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	if s.dialect == "sqlserver" {
+	if s.db.Dialect == dbutil.MSSQL {
 		_, err := s.db.Exec(context.TODO(), mssqlPutAppStateSyncKeyQuery, s.JID, id, key.Data, key.Timestamp, key.Fingerprint)
 		return err
 	}
@@ -684,7 +683,7 @@ func (s *SQLStore) PutAppStateSyncKey(id []byte, key store.AppStateSyncKey) erro
 func (s *SQLStore) GetAppStateSyncKey(id []byte) (*store.AppStateSyncKey, error) {
 	var key store.AppStateSyncKey
 	var err error
-	if s.dialect == "sqlserver" {
+	if s.db.Dialect == dbutil.MSSQL {
 		err = s.db.QueryRow(context.TODO(), mssqlGetAppStateSyncKeyQuery, s.JID, id).Scan(&key.Data, &key.Timestamp, &key.Fingerprint)
 	} else {
 		err = s.db.QueryRow(context.TODO(), sqliteGetAppStateSyncKeyQuery, s.JID, id).Scan(&key.Data, &key.Timestamp, &key.Fingerprint)
@@ -698,7 +697,7 @@ func (s *SQLStore) GetAppStateSyncKey(id []byte) (*store.AppStateSyncKey, error)
 func (s *SQLStore) GetLatestAppStateSyncKeyID() ([]byte, error) {
 	var keyID []byte
 	var err error
-	if s.dialect == "sqlserver" {
+	if s.db.Dialect == dbutil.MSSQL {
 		err = s.db.QueryRow(context.TODO(), mssqlGetLatestAppStateSyncKeyIDQuery, s.JID).Scan(&keyID)
 	} else {
 		err = s.db.QueryRow(context.TODO(), sqliteGetLatestAppStateSyncKeyIDQuery, s.JID).Scan(&keyID)
@@ -738,7 +737,7 @@ const (
 func (s *SQLStore) PutAppStateVersion(name string, version uint64, hash [128]byte) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	if s.dialect == "sqlserver" {
+	if s.db.Dialect == dbutil.MSSQL {
 		_, err := s.db.Exec(context.TODO(), mssqlPutAppStateVersionQuery, s.JID, name, version, hash[:])
 		return err
 	}
@@ -748,7 +747,7 @@ func (s *SQLStore) PutAppStateVersion(name string, version uint64, hash [128]byt
 
 func (s *SQLStore) GetAppStateVersion(name string) (version uint64, hash [128]byte, err error) {
 	var uncheckedHash []byte
-	if s.dialect == "sqlserver" {
+	if s.db.Dialect == dbutil.MSSQL {
 		err = s.db.QueryRow(context.TODO(), mssqlGetAppStateVersionQuery, s.JID, name).Scan(&version, &uncheckedHash)
 	} else {
 		err = s.db.QueryRow(context.TODO(), sqliteGetAppStateVersionQuery, s.JID, name).Scan(&version, &uncheckedHash)
@@ -789,11 +788,11 @@ func (s *SQLStore) putAppStateMutationMACs(ctx context.Context, name string, ver
 		values[baseIndex+1] = mutation.ValueMAC
 		queryParts[i] = fmt.Sprintf(placeholderSyntax, baseIndex+1, baseIndex+2)
 	}
-	if s.dialect == "sqlserver" {
-		_, err := tx.Exec(ctx, mssqlPutAppStateMutationMACsQuery+strings.Join(queryParts, ","), values...)
+	if s.db.Dialect == dbutil.MSSQL {
+		_, err := s.db.Exec(ctx, mssqlPutAppStateMutationMACsQuery+strings.Join(queryParts, ","), values...)
 		return err
 	}
-	_, err := tx.Exec(ctx, sqlitePutAppStateMutationMACsQuery+strings.Join(queryParts, ","), values...)
+	_, err := s.db.Exec(ctx, sqlitePutAppStateMutationMACsQuery+strings.Join(queryParts, ","), values...)
 	return err
 }
 
@@ -804,7 +803,7 @@ func (s *SQLStore) PutAppStateMutationMACs(name string, version uint64, mutation
 		return nil
 	}
 	bulkimportStr := mssql.CopyIn("whatsmeow_app_state_mutation_macs", mssql.BulkOptions{}, "jid", "name", "version_info", "index_mac", "value_mac")
-	stmt, err := s.db.Prepare(bulkimportStr)
+	stmt, err := s.db.RawDB.PrepareContext(context.TODO(), bulkimportStr)
 	if err != nil {
 		return fmt.Errorf("failed to prepare bulk: %w", err)
 	}
@@ -836,7 +835,7 @@ func (s *SQLStore) DeleteAppStateMutationMACs(name string, indexMACs [][]byte) (
 }
 
 func (s *SQLStore) GetAppStateMutationMAC(name string, indexMAC []byte) (valueMAC []byte, err error) {
-	if s.dialect == "sqlserver" {
+	if s.db.Dialect == dbutil.MSSQL {
 		err = s.db.QueryRow(context.TODO(), mssqlGetAppStateMutationMACQuery, s.JID, name, indexMAC).Scan(&valueMAC)
 	} else {
 		err = s.db.QueryRow(context.TODO(), sqliteGetAppStateMutationMACQuery, s.JID, name, indexMAC).Scan(&valueMAC)
@@ -922,7 +921,7 @@ func (s *SQLStore) PutPushName(user types.JID, pushName string) (bool, string, e
 		return false, "", err
 	}
 	if cached.PushName != pushName {
-		if s.dialect == "sqlserver" {
+		if s.db.Dialect == dbutil.MSSQL {
 			_, err = s.db.Exec(context.TODO(), mssqlPutPushNameQuery, s.JID, user, pushName)
 		} else {
 			_, err = s.db.Exec(context.TODO(), sqlitePutPushNameQuery, s.JID, user, pushName)
@@ -947,7 +946,7 @@ func (s *SQLStore) PutBusinessName(user types.JID, businessName string) (bool, s
 		return false, "", err
 	}
 	if cached.BusinessName != businessName {
-		if s.dialect == "sqlserver" {
+		if s.db.Dialect == dbutil.MSSQL {
 			_, err = s.db.Exec(context.TODO(), mssqlPutBusinessNameQuery, s.JID, user, businessName)
 		} else {
 			_, err = s.db.Exec(context.TODO(), sqlitePutBusinessNameQuery, s.JID, user, businessName)
@@ -972,7 +971,7 @@ func (s *SQLStore) PutContactName(user types.JID, firstName, fullName string) er
 		return err
 	}
 	if cached.FirstName != firstName || cached.FullName != fullName {
-		if s.dialect == "sqlserver" {
+		if s.db.Dialect == dbutil.MSSQL {
 			_, err = s.db.Exec(context.TODO(), mssqlPutContactNameQuery, s.JID, user, firstName, fullName)
 		} else {
 			_, err = s.db.Exec(context.TODO(), sqlitePutContactNameQuery, s.JID, user, firstName, fullName)
@@ -1016,11 +1015,11 @@ func (s *SQLStore) putContactNamesBatch(ctx context.Context, contacts []store.Co
 		queryParts = append(queryParts, fmt.Sprintf(placeholderSyntax, baseIndex+1, baseIndex+2, baseIndex+3))
 		i++
 	}
-	if s.dialect == "sqlserver" {
-		_, err := tx.Exec(ctx, fmt.Sprintf(mssqlPutManyContactNamesQuery, strings.Join(queryParts, ",")), values...)
+	if s.db.Dialect == dbutil.MSSQL {
+		_, err := s.db.Exec(ctx, fmt.Sprintf(mssqlPutManyContactNamesQuery, strings.Join(queryParts, ",")), values...)
 		return err
 	}
-	_, err := tx.Exec(ctx, fmt.Sprintf(sqlitePutManyContactNamesQuery, strings.Join(queryParts, ",")), values...)
+	_, err := s.db.Exec(ctx, fmt.Sprintf(sqlitePutManyContactNamesQuery, strings.Join(queryParts, ",")), values...)
 	return err
 }
 
@@ -1121,7 +1120,7 @@ func (s *SQLStore) PutMutedUntil(chat types.JID, mutedUntil time.Time) error {
 	}
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	if s.dialect == "sqlserver" {
+	if s.db.Dialect == dbutil.MSSQL {
 		_, err := s.db.Exec(context.TODO(), fmt.Sprintf(mssqlPutChatSettingQuery, "muted_until"), s.JID, chat, val)
 		return err
 	}
@@ -1132,7 +1131,7 @@ func (s *SQLStore) PutMutedUntil(chat types.JID, mutedUntil time.Time) error {
 func (s *SQLStore) PutPinned(chat types.JID, pinned bool) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	if s.dialect == "sqlserver" {
+	if s.db.Dialect == dbutil.MSSQL {
 		_, err := s.db.Exec(context.TODO(), fmt.Sprintf(mssqlPutChatSettingQuery, "pinned"), s.JID, chat, pinned)
 		return err
 	}
@@ -1143,7 +1142,7 @@ func (s *SQLStore) PutPinned(chat types.JID, pinned bool) error {
 func (s *SQLStore) PutArchived(chat types.JID, archived bool) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	if s.dialect == "sqlserver" {
+	if s.db.Dialect == dbutil.MSSQL {
 		_, err := s.db.Exec(context.TODO(), fmt.Sprintf(mssqlPutChatSettingQuery, "archived"), s.JID, chat, archived)
 		return err
 	}
@@ -1198,7 +1197,7 @@ func (s *SQLStore) PutMessageSecrets(inserts []store.MessageSecretInsert) (err e
 		return nil
 	}
 	dt := time.Now()
-	_, err = tx.Exec(fmt.Sprintf(`CREATE TABLE staging_messagesecrets_%d (
+	_, err = s.db.Exec(context.TODO(), fmt.Sprintf(`CREATE TABLE staging_messagesecrets_%d (
 			our_jid    VARCHAR(300),
 			chat_jid   VARCHAR(200),
 			sender_jid  VARCHAR(200),
@@ -1207,38 +1206,31 @@ func (s *SQLStore) PutMessageSecrets(inserts []store.MessageSecretInsert) (err e
 		)
 	`, dt.UnixMilli()))
 	if err != nil {
-		tx.Rollback()
 		return fmt.Errorf("failed to create table: %w", err)
 	}
 	bulkImportStr := mssql.CopyIn(fmt.Sprintf("staging_messagesecrets_%d", dt.UnixMilli()), mssql.BulkOptions{}, "our_jid", "chat_jid", "sender_jid", "message_id", "key_info")
-	stmt, err := tx.Prepare(bulkImportStr)
+	stmt, err := s.db.RawDB.PrepareContext(context.TODO(), bulkImportStr)
 	if err != nil {
-		tx.Rollback()
 		return fmt.Errorf("failed to prepare bulk: %w", err)
 	}
 	for _, insert := range inserts {
 		_, err = stmt.Exec(s.JID, insert.Chat.ToNonAD(), insert.Sender.ToNonAD(), insert.ID, insert.Secret)
 		if err != nil {
-			tx.Rollback()
 			return fmt.Errorf("failed to prepare insert: %w", err)
 		}
 	}
 	_, err = stmt.Exec()
 	if err != nil {
-		tx.Rollback()
 		return fmt.Errorf("failed to execute bulk: %w", err)
 	}
-	_, err = tx.Exec(fmt.Sprintf("MERGE INTO whatsmeow_message_secrets AS target USING staging_messagesecrets_%d AS source ON target.our_jid = source.our_jid AND target.chat_jid = source.chat_jid AND target.sender_jid = source.sender_jid AND target.message_id = source.message_id WHEN NOT MATCHED THEN INSERT (our_jid, chat_jid, sender_jid, message_id, key_info) VALUES (source.our_jid, source.chat_jid, source.sender_jid, source.message_id, source.key_info);", dt.UnixMilli()))
+	_, err = s.db.Exec(context.TODO(), fmt.Sprintf("MERGE INTO whatsmeow_message_secrets AS target USING staging_messagesecrets_%d AS source ON target.our_jid = source.our_jid AND target.chat_jid = source.chat_jid AND target.sender_jid = source.sender_jid AND target.message_id = source.message_id WHEN NOT MATCHED THEN INSERT (our_jid, chat_jid, sender_jid, message_id, key_info) VALUES (source.our_jid, source.chat_jid, source.sender_jid, source.message_id, source.key_info);", dt.UnixMilli()))
 	if err != nil {
-		tx.Rollback()
 		return fmt.Errorf("failed to merge bulk: %w", err)
 	}
-	_, err = tx.Exec(fmt.Sprintf("DROP TABLE staging_messagesecrets_%d", dt.UnixMilli()))
+	_, err = s.db.Exec(context.TODO(), fmt.Sprintf("DROP TABLE staging_messagesecrets_%d", dt.UnixMilli()))
 	if err != nil {
-		tx.Rollback()
 		return fmt.Errorf("failed to merge bulk: %w", err)
 	}
-	err = tx.Commit()
 	if err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
@@ -1259,7 +1251,7 @@ func (s *SQLStore) PutMessageSecret(chat, sender types.JID, id types.MessageID, 
 }
 
 func (s *SQLStore) GetMessageSecret(chat, sender types.JID, id types.MessageID) (secret []byte, err error) {
-	if s.dialect == "sqlserver" {
+	if s.db.Dialect == dbutil.MSSQL {
 		err = s.db.QueryRow(context.TODO(), mssqlGetMsgSecret, s.JID, chat.ToNonAD(), sender.ToNonAD(), id).Scan(&secret)
 	} else {
 		err = s.db.QueryRow(context.TODO(), sqliteGetMsgSecret, s.JID, chat.ToNonAD(), sender.ToNonAD(), id).Scan(&secret)
@@ -1291,12 +1283,8 @@ const (
 )
 
 func (s *SQLStore) PutPrivacyTokens(tokens ...store.PrivacyToken) error {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
 	dt := time.Now()
-	_, err = tx.Exec(fmt.Sprintf(`CREATE TABLE staging_privacytokens_%d (
+	_, err := s.db.Exec(context.TODO(), fmt.Sprintf(`CREATE TABLE staging_privacytokens_%d (
 			our_jid   VARCHAR(300),
 			their_jid VARCHAR(300),
 			token     VARBINARY(max)  NOT NULL,
@@ -1304,28 +1292,24 @@ func (s *SQLStore) PutPrivacyTokens(tokens ...store.PrivacyToken) error {
 		)
 	`, dt.UnixMilli()))
 	if err != nil {
-		tx.Rollback()
 		return fmt.Errorf("failed to create table: %w", err)
 	}
 	bulkImportStr := mssql.CopyIn(fmt.Sprintf("staging_privacytokens_%d", dt.UnixMilli()), mssql.BulkOptions{}, "our_jid", "their_jid", "token", "timestamp_info")
-	stmt, err := tx.Prepare(bulkImportStr)
+	stmt, err := s.db.RawDB.PrepareContext(context.TODO(), bulkImportStr)
 	if err != nil {
-		tx.Rollback()
 		return fmt.Errorf("failed to prepare bulk: %w", err)
 	}
 	for _, token := range tokens {
 		_, err = stmt.Exec(s.JID, token.User.ToNonAD().String(), token.Token, token.Timestamp.Unix())
 		if err != nil {
-			tx.Rollback()
 			return fmt.Errorf("failed to prepare insert: %w", err)
 		}
 	}
 	_, err = stmt.Exec()
 	if err != nil {
-		tx.Rollback()
 		return fmt.Errorf("failed to execute bulk: %w", err)
 	}
-	_, err = tx.Exec(fmt.Sprintf(`MERGE INTO whatsmeow_privacy_tokens AS target 
+	_, err = s.db.Exec(context.TODO(), fmt.Sprintf(`MERGE INTO whatsmeow_privacy_tokens AS target 
 		USING staging_privacytokens_%d AS source 
 		ON target.our_jid = source.our_jid AND target.their_jid = source.their_jid
 		WHEN MATCHED THEN
@@ -1334,15 +1318,12 @@ func (s *SQLStore) PutPrivacyTokens(tokens ...store.PrivacyToken) error {
 			INSERT (our_jid, their_jid, token, timestamp_info)
 			VALUES (source.our_jid, source.their_jid, source.token, source.timestamp_info);`, dt.UnixMilli()))
 	if err != nil {
-		tx.Rollback()
 		return fmt.Errorf("failed to merge bulk: %w", err)
 	}
-	_, err = tx.Exec(fmt.Sprintf("DROP TABLE staging_privacytokens_%d", dt.UnixMilli()))
+	_, err = s.db.Exec(context.TODO(), fmt.Sprintf("DROP TABLE staging_privacytokens_%d", dt.UnixMilli()))
 	if err != nil {
-		tx.Rollback()
 		return fmt.Errorf("failed to merge bulk: %w", err)
 	}
-	err = tx.Commit()
 	if err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
@@ -1354,7 +1335,7 @@ func (s *SQLStore) GetPrivacyToken(user types.JID) (*store.PrivacyToken, error) 
 	token.User = user.ToNonAD()
 	var ts int64
 	var err error
-	if s.dialect == "sqlserver" {
+	if s.db.Dialect == dbutil.MSSQL {
 		err = s.db.QueryRow(context.TODO(), mssqlGetPrivacyToken, s.JID, token.User).Scan(&token.Token, &ts)
 	} else {
 		err = s.db.QueryRow(context.TODO(), sqliteGetPrivacyToken, s.JID, token.User).Scan(&token.Token, &ts)
@@ -1397,7 +1378,7 @@ func (s *SQLStore) CacheSessions(addresses []string) (final map[string][]byte) {
 		queryParams[index+1] = address
 	}
 	query += ")"
-	rows, err := s.db.Query(query, queryParams...)
+	rows, err := s.db.Query(context.TODO(), query, queryParams...)
 	if err != nil {
 		s.log.Errorf(err.Error())
 		return
@@ -1427,7 +1408,7 @@ func (s *SQLStore) CacheIdentities(addresses []string) (final map[string][32]byt
 		queryParams[index+1] = address
 	}
 	query += ")"
-	rows, err := s.db.Query(query, queryParams...)
+	rows, err := s.db.Query(context.TODO(), query, queryParams...)
 	if err != nil {
 		s.log.Errorf(err.Error())
 		return
@@ -1454,14 +1435,14 @@ func (s *SQLStore) StoreSessions(sessions map[string][]byte, oldAddresses []stri
 			queryParams[index+1] = address
 		}
 		query += ")"
-		_, err := s.db.Exec(query, queryParams...)
+		_, err := s.db.Exec(context.TODO(), query, queryParams...)
 		if err != nil {
 			s.log.Errorf("Could not Remove Sessions: " + err.Error())
 			return
 		}
 	}
 	bulkImportStr := mssql.CopyIn("whatsmeow_sessions", mssql.BulkOptions{}, "our_jid", "their_id", "session")
-	stmt, err := s.db.Prepare(bulkImportStr)
+	stmt, err := s.db.RawDB.PrepareContext(context.TODO(), bulkImportStr)
 	for address, session := range sessions {
 		stmt.Exec(s.JID, address, session[:])
 	}
@@ -1484,14 +1465,14 @@ func (s *SQLStore) StoreIdentities(identityKeys map[string][32]byte, oldAddresse
 			queryParams[index+1] = address
 		}
 		query += ")"
-		_, err := s.db.Exec(query, queryParams...)
+		_, err := s.db.Exec(context.TODO(), query, queryParams...)
 		if err != nil {
 			s.log.Errorf("Could not Remove Identity Keys: " + err.Error())
 			return
 		}
 	}
 	bulkImportStr := mssql.CopyIn("whatsmeow_identity_keys", mssql.BulkOptions{}, "our_jid", "their_id", "identity_info")
-	stmt, err := s.db.Prepare(bulkImportStr)
+	stmt, err := s.db.RawDB.PrepareContext(context.TODO(), bulkImportStr)
 	for address, identityInfo := range identityKeys {
 		stmt.Exec(s.JID, address, identityInfo[:])
 	}
@@ -1507,18 +1488,18 @@ func (s *SQLStore) PutMessageNode(user string, group *string, node *waBinary.Nod
 		return fmt.Errorf("failed to marshal node: %w", err)
 	}
 	if group != nil {
-		if s.dialect == "sqlserver" {
-			_, err = s.db.Exec(mssqlPutNodeWithGroup, s.JID, user, *group, nodeData)
+		if s.db.Dialect == dbutil.MSSQL {
+			_, err = s.db.Exec(context.TODO(), mssqlPutNodeWithGroup, s.JID, user, *group, nodeData)
 		}
 	} else {
-		if s.dialect == "sqlserver" {
-			_, err = s.db.Exec(mssqlPutNodeWithoutGroup, s.JID, user, nodeData)
+		if s.db.Dialect == dbutil.MSSQL {
+			_, err = s.db.Exec(context.TODO(), mssqlPutNodeWithoutGroup, s.JID, user, nodeData)
 		}
 	}
 	return err
 }
 func (s *SQLStore) GetMessageNodesByUser(user string) (map[int]waBinary.Node, error) {
-	rows, err := s.db.Query(getNodesByPerson, s.JID, user)
+	rows, err := s.db.Query(context.TODO(), getNodesByPerson, s.JID, user)
 	if err != nil {
 		return nil, err
 	}
@@ -1538,7 +1519,7 @@ func (s *SQLStore) GetMessageNodesByUser(user string) (map[int]waBinary.Node, er
 	return output, nil
 }
 func (s *SQLStore) GetMessageNodesByGroup(group string) (map[int]waBinary.Node, error) {
-	rows, err := s.db.Query(getNodesByGroup, s.JID, group)
+	rows, err := s.db.Query(context.TODO(), getNodesByGroup, s.JID, group)
 	if err != nil {
 		return nil, err
 	}
@@ -1559,6 +1540,6 @@ func (s *SQLStore) GetMessageNodesByGroup(group string) (map[int]waBinary.Node, 
 }
 
 func (s *SQLStore) DeleteMessageNode(ref int) (err error) {
-	_, err = s.db.Exec(removeMessageNodeQuery, ref)
+	_, err = s.db.Exec(context.TODO(), removeMessageNodeQuery, ref)
 	return err
 }

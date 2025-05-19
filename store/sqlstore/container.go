@@ -30,15 +30,12 @@ import (
 // Container is a wrapper for a SQL database that can contain multiple whatsmeow sessions.
 type Container struct {
 	db                   *RetryDB
-	dialect              string
 	log                  waLog.Logger
 	mutex                sync.Mutex
 	DatabaseErrorHandler func(device *store.Device, action string, attemptIndex int, err error) (retry bool)
 }
 
 var _ store.DeviceContainer = (*Container)(nil)
-
-var containerDbInstance *RetryDB
 
 // New connects to the given SQL database and wraps it in a Container.
 //
@@ -50,19 +47,14 @@ var containerDbInstance *RetryDB
 //
 //	container, err := sqlstore.New("sqlite3", "file:yoursqlitefile.db?_foreign_keys=on", nil)
 func New(dialect, address string, log waLog.Logger, maxConnection int) (*Container, error) {
-	if containerDbInstance == nil {
-		db, err := sql.Open(dialect, address)
-		if err != nil {
-			return nil, fmt.Errorf("failed to open database: %w", err)
-		}
-		db.SetMaxOpenConns(maxConnection)
-		db.SetMaxIdleConns(maxConnection)
-		containerDbInstance = &RetryDB{
-			DB: db,
-		}
+	db, err := sql.Open(dialect, address)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
-	container := NewWithDB(containerDbInstance, dialect, log)
-	err := container.Upgrade()
+	db.SetMaxOpenConns(maxConnection)
+	db.SetMaxIdleConns(maxConnection)
+	container := NewWithDB(db, dialect, log)
+	err = container.Upgrade()
 	if err != nil {
 		return nil, fmt.Errorf("failed to upgrade database: %w", err)
 	}
@@ -95,7 +87,9 @@ func NewWithDB(db *sql.DB, dialect string, log waLog.Logger) *Container {
 	}
 	wrapped.UpgradeTable = upgrades.Table
 	wrapped.VersionTable = "whatsmeow_version"
-	return NewWithWrappedDB(wrapped, log)
+	return NewWithWrappedDB(&RetryDB{
+		Database: wrapped,
+	}, log)
 }
 
 func NewWithWrappedDB(wrapped *RetryDB, log waLog.Logger) *Container {
@@ -168,7 +162,7 @@ func (c *Container) GetActiveManagers() ([]string, error) {
 	// }
 	// defer conn.Close()
 	// rows, err := conn.QueryContext(ctx, getActiveManagerIds)
-	rows, err := c.db.Query(getActiveManagerIds)
+	rows, err := c.db.RawDB.Query(getActiveManagerIds)
 	if err != nil {
 		return nil, err
 	}
@@ -188,7 +182,7 @@ func (c *Container) GetActiveManagers() ([]string, error) {
 
 func (c *Container) GetNumberManager(jid types.JID) (string, error) {
 	var managerId string
-	err := c.db.QueryRow(getNumberManager, jid).Scan(&managerId)
+	err := c.db.RawDB.QueryRow(getNumberManager, jid).Scan(&managerId)
 	if err != nil {
 		return "", err
 	}
@@ -275,11 +269,11 @@ func (c *Container) GetFirstDevice(managerId string) (*store.Device, error) {
 func (c *Container) GetAllManagerDevice(managerId string, lockTime int) ([]*store.Device, int64, error) {
 	dt := time.Now().Add(time.Duration(lockTime) * time.Minute).UnixMilli()
 	mintime := time.Now().UnixMilli()
-	_, err := c.db.Exec(lockDeviceByManagerId, dt, managerId, mintime)
+	_, err := c.db.RawDB.Exec(lockDeviceByManagerId, dt, managerId, mintime)
 	if err != nil {
 		return nil, 0, err
 	}
-	rows, err := c.db.Query(getDeviceByManagerId, managerId, dt)
+	rows, err := c.db.RawDB.Query(getDeviceByManagerId, managerId, dt)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -296,7 +290,7 @@ func (c *Container) GetAllManagerDevice(managerId string, lockTime int) ([]*stor
 }
 
 func (c *Container) ReLockManagerDevice(managerId string, lastLockedTime, newLockedTime int64) (bool, error) {
-	res, err := c.db.Exec(relockDeviceByManagerId, newLockedTime, managerId, lastLockedTime)
+	res, err := c.db.RawDB.Exec(relockDeviceByManagerId, newLockedTime, managerId, lastLockedTime)
 	if err != nil {
 		return false, err
 	}
@@ -308,7 +302,7 @@ func (c *Container) ReLockManagerDevice(managerId string, lastLockedTime, newLoc
 }
 
 func (c *Container) GetAllManagerDeviceWithoutLock(managerId string) ([]*store.Device, error) {
-	rows, err := c.db.Query(getDeviceByManagerIdNoLock, managerId)
+	rows, err := c.db.RawDB.Query(getDeviceByManagerIdNoLock, managerId)
 	if err != nil {
 		return nil, err
 	}
@@ -327,7 +321,7 @@ func (c *Container) GetAllManagerDeviceWithoutLock(managerId string) ([]*store.D
 func (c *Container) ExistsLockedDevice(managerId string) bool {
 	dt := time.Now().UnixMilli()
 	var exists bool
-	err := c.db.QueryRow(existsLockedDevice, managerId, dt).Scan(&exists)
+	err := c.db.RawDB.QueryRow(existsLockedDevice, managerId, dt).Scan(&exists)
 	if err != nil {
 		return false
 	}
@@ -335,7 +329,7 @@ func (c *Container) ExistsLockedDevice(managerId string) bool {
 }
 
 func (c *Container) UnlockManagerDevice(managerId string, lastLock int64) error {
-	_, err := c.db.Exec(unlockDeviceByManagerId, managerId, lastLock)
+	_, err := c.db.RawDB.Exec(unlockDeviceByManagerId, managerId, lastLock)
 	return err
 }
 
@@ -433,7 +427,7 @@ func (c *Container) PutDevice(device *store.Device) error {
 		return ErrDeviceIDMustBeSet
 	}
 	var err error
-	if c.dialect == "sqlserver" {
+	if c.db.Dialect == dbutil.MSSQL {
 		_, err = c.db.Exec(context.TODO(), mssqlInsertDeviceQuery,
 			device.ID.String(), device.LID, device.RegistrationID, device.NoiseKey.Priv[:], device.IdentityKey.Priv[:],
 			device.SignedPreKey.Priv[:], device.SignedPreKey.KeyID, device.SignedPreKey.Signature[:],
@@ -481,6 +475,6 @@ func (c *Container) DeleteMessageNode(store *store.Device) error {
 	if store.ID == nil {
 		return ErrDeviceIDMustBeSet
 	}
-	_, err := c.db.Exec(deleteMessageNodes, store.ID.String())
+	_, err := c.db.RawDB.Exec(deleteMessageNodes, store.ID.String())
 	return err
 }

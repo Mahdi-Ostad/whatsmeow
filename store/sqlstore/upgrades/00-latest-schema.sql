@@ -1,138 +1,122 @@
 -- v0 -> v7 (compatible with v6+): Latest schema
 CREATE TABLE whatsmeow_device (
-	jid TEXT PRIMARY KEY,
-	lid TEXT,
-
-	facebook_uuid uuid,
-
+	jid VARCHAR(300) PRIMARY KEY ,
+	lid VARCHAR(300),
+	facebook_uuid UNIQUEIDENTIFIER,
 	registration_id BIGINT NOT NULL CHECK ( registration_id >= 0 AND registration_id < 4294967296 ),
-
-	noise_key    bytea NOT NULL CHECK ( length(noise_key) = 32 ),
-	identity_key bytea NOT NULL CHECK ( length(identity_key) = 32 ),
-
-	signed_pre_key     bytea   NOT NULL CHECK ( length(signed_pre_key) = 32 ),
+	noise_key    VARBINARY(max) NOT NULL CHECK ( LEN(noise_key) = 32 ),
+	identity_key VARBINARY(max) NOT NULL CHECK ( LEN(identity_key) = 32 ),
+	signed_pre_key     VARBINARY(max)   NOT NULL CHECK ( LEN(signed_pre_key) = 32 ),
 	signed_pre_key_id  INTEGER NOT NULL CHECK ( signed_pre_key_id >= 0 AND signed_pre_key_id < 16777216 ),
-	signed_pre_key_sig bytea   NOT NULL CHECK ( length(signed_pre_key_sig) = 64 ),
-
-	adv_key             bytea NOT NULL,
-	adv_details         bytea NOT NULL,
-	adv_account_sig     bytea NOT NULL CHECK ( length(adv_account_sig) = 64 ),
-	adv_account_sig_key bytea NOT NULL CHECK ( length(adv_account_sig_key) = 32 ),
-	adv_device_sig      bytea NOT NULL CHECK ( length(adv_device_sig) = 64 ),
-
-	platform      TEXT NOT NULL DEFAULT '',
-	business_name TEXT NOT NULL DEFAULT '',
-	push_name     TEXT NOT NULL DEFAULT ''
+	signed_pre_key_sig VARBINARY(max)   NOT NULL CHECK ( LEN(signed_pre_key_sig) = 64 ),
+	adv_key         VARBINARY(max) NOT NULL,
+	adv_details     VARBINARY(max) NOT NULL,
+	adv_account_sig VARBINARY(max) NOT NULL CHECK ( LEN(adv_account_sig) = 64 ),
+	adv_account_sig_key  VARBINARY(max) NOT NULL CHECK ( LEN(adv_account_sig_key) = 32 ),
+	adv_device_sig  VARBINARY(max) NOT NULL CHECK ( LEN(adv_device_sig) = 64 ),
+	platform      VARCHAR(300) NOT NULL DEFAULT '',
+	business_name VARCHAR(300) NOT NULL DEFAULT '',
+	push_name     VARCHAR(300) NOT NULL DEFAULT '',
+	manager_id     VARCHAR(300) NOT NULL DEFAULT ''
 );
-
 CREATE TABLE whatsmeow_identity_keys (
-	our_jid  TEXT,
-	their_id TEXT,
-	identity bytea NOT NULL CHECK ( length(identity) = 32 ),
-
+	our_jid  VARCHAR(300),
+	their_id VARCHAR(300),
+	identity_info VARBINARY(max) NOT NULL CHECK ( LEN(identity_info) = 32 ),
 	PRIMARY KEY (our_jid, their_id),
 	FOREIGN KEY (our_jid) REFERENCES whatsmeow_device(jid) ON DELETE CASCADE ON UPDATE CASCADE
 );
 
 CREATE TABLE whatsmeow_pre_keys (
-	jid      TEXT,
-	key_id   INTEGER          CHECK ( key_id >= 0 AND key_id < 16777216 ),
-	key      bytea   NOT NULL CHECK ( length(key) = 32 ),
-	uploaded BOOLEAN NOT NULL,
-
+	jid      VARCHAR(300),
+	key_id   INTEGER  CHECK ( key_id >= 0 AND key_id < 16777216 ),
+	key_info       VARBINARY(max)  NOT NULL CHECK (LEN(key_info) = 32 ),
+	uploaded BIT NOT NULL,
 	PRIMARY KEY (jid, key_id),
 	FOREIGN KEY (jid) REFERENCES whatsmeow_device(jid) ON DELETE CASCADE ON UPDATE CASCADE
 );
 
 CREATE TABLE whatsmeow_sessions (
-	our_jid  TEXT,
-	their_id TEXT,
-	session  bytea,
-
+	our_jid   VARCHAR(300),
+	their_id  VARCHAR(300),
+	session  VARBINARY(max),
 	PRIMARY KEY (our_jid, their_id),
 	FOREIGN KEY (our_jid) REFERENCES whatsmeow_device(jid) ON DELETE CASCADE ON UPDATE CASCADE
 );
 
 CREATE TABLE whatsmeow_sender_keys (
-	our_jid    TEXT,
-	chat_id    TEXT,
-	sender_id  TEXT,
-	sender_key bytea NOT NULL,
-
+	our_jid     VARCHAR(300),
+	chat_id     VARCHAR(300),
+	sender_id  VARCHAR(300),
+	sender_key  VARBINARY(max) NOT NULL,
 	PRIMARY KEY (our_jid, chat_id, sender_id),
 	FOREIGN KEY (our_jid) REFERENCES whatsmeow_device(jid) ON DELETE CASCADE ON UPDATE CASCADE
 );
 
 CREATE TABLE whatsmeow_app_state_sync_keys (
-	jid         TEXT,
-	key_id      bytea,
-	key_data    bytea  NOT NULL,
-	timestamp   BIGINT NOT NULL,
-	fingerprint bytea  NOT NULL,
-
+	jid         VARCHAR(300),
+	key_id      VARBINARY(300),
+	key_data    VARBINARY(max)  NOT NULL,
+	timestamp_info   BIGINT NOT NULL,
+	fingerprint VARBINARY(max)  NOT NULL,
 	PRIMARY KEY (jid, key_id),
 	FOREIGN KEY (jid) REFERENCES whatsmeow_device(jid) ON DELETE CASCADE ON UPDATE CASCADE
 );
 
 CREATE TABLE whatsmeow_app_state_version (
-	jid     TEXT,
-	name    TEXT,
-	version BIGINT NOT NULL,
-	hash    bytea  NOT NULL CHECK ( length(hash) = 128 ),
-
+	jid     VARCHAR(300),
+	name    VARCHAR(300),
+	version_info BIGINT NOT NULL,
+	hash    VARBINARY(max)  NOT NULL CHECK ( LEN(hash) = 128 ),
 	PRIMARY KEY (jid, name),
 	FOREIGN KEY (jid) REFERENCES whatsmeow_device(jid) ON DELETE CASCADE ON UPDATE CASCADE
 );
 
 CREATE TABLE whatsmeow_app_state_mutation_macs (
-	jid       TEXT,
-	name      TEXT,
-	version   BIGINT,
-	index_mac bytea          CHECK ( length(index_mac) = 32 ),
-	value_mac bytea NOT NULL CHECK ( length(value_mac) = 32 ),
-
-	PRIMARY KEY (jid, name, version, index_mac),
+	jid        VARCHAR(300),
+	name       VARCHAR(300),
+	version_info   BIGINT,
+	index_mac VARBINARY(200) CHECK ( LEN(index_mac) = 32 ),
+	value_mac VARBINARY(max) NOT NULL CHECK ( LEN(value_mac) = 32 ),
+	PRIMARY KEY (jid, name, version_info, index_mac),
 	FOREIGN KEY (jid, name) REFERENCES whatsmeow_app_state_version(jid, name) ON DELETE CASCADE ON UPDATE CASCADE
 );
 
 CREATE TABLE whatsmeow_contacts (
-	our_jid       TEXT,
-	their_jid     TEXT,
-	first_name    TEXT,
-	full_name     TEXT,
-	push_name     TEXT,
-	business_name TEXT,
-
+	our_jid       VARCHAR(300),
+	their_jid     VARCHAR(300),
+	first_name    VARCHAR(300),
+	full_name     VARCHAR(300),
+	push_name     VARCHAR(300),
+	business_name VARCHAR(300),
 	PRIMARY KEY (our_jid, their_jid),
 	FOREIGN KEY (our_jid) REFERENCES whatsmeow_device(jid) ON DELETE CASCADE ON UPDATE CASCADE
 );
 
 CREATE TABLE whatsmeow_chat_settings (
-	our_jid       TEXT,
-	chat_jid      TEXT,
+	our_jid       VARCHAR(300),
+	chat_jid      VARCHAR(300),
 	muted_until   BIGINT  NOT NULL DEFAULT 0,
-	pinned        BOOLEAN NOT NULL DEFAULT false,
-	archived      BOOLEAN NOT NULL DEFAULT false,
-
+	pinned        BIT NOT NULL DEFAULT 0,
+	archived      BIT NOT NULL DEFAULT 1,
 	PRIMARY KEY (our_jid, chat_jid),
 	FOREIGN KEY (our_jid) REFERENCES whatsmeow_device(jid) ON DELETE CASCADE ON UPDATE CASCADE
 );
 
 CREATE TABLE whatsmeow_message_secrets (
-	our_jid    TEXT,
-	chat_jid   TEXT,
-	sender_jid TEXT,
-	message_id TEXT,
-	key        bytea NOT NULL,
-
+	our_jid    VARCHAR(300),
+	chat_jid   VARCHAR(200),
+	sender_jid  VARCHAR(200),
+	message_id VARCHAR(200),
+	key_info  VARBINARY(max) NOT NULL,
 	PRIMARY KEY (our_jid, chat_jid, sender_jid, message_id),
 	FOREIGN KEY (our_jid) REFERENCES whatsmeow_device(jid) ON DELETE CASCADE ON UPDATE CASCADE
 );
 
 CREATE TABLE whatsmeow_privacy_tokens (
-	our_jid   TEXT,
-	their_jid TEXT,
-	token     bytea  NOT NULL,
-	timestamp BIGINT NOT NULL,
+	our_jid   VARCHAR(300),
+	their_jid VARCHAR(300),
+	token     VARBINARY(max)  NOT NULL,
+	timestamp_info BIGINT NOT NULL,
 	PRIMARY KEY (our_jid, their_jid)
 );

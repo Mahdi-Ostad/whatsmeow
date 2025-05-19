@@ -7,12 +7,12 @@ toolchain go1.24.1
 require (
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.0
-	github.com/rs/zerolog v1.33.0
+	github.com/rs/zerolog v1.34.0
 	go.mau.fi/libsignal v0.1.2
 	go.mau.fi/util v0.8.6
-	golang.org/x/crypto v0.36.0
-	golang.org/x/net v0.37.0
-	google.golang.org/protobuf v1.36.5
+	golang.org/x/crypto v0.38.0
+	golang.org/x/net v0.40.0
+	google.golang.org/protobuf v1.36.6
 )
 
 require (
@@ -25,7 +25,9 @@ require (
 	github.com/denisenkom/go-mssqldb v0.12.3
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.19 // indirect
-	github.com/petermattis/goid v0.0.0-20250303134427-723919f7f203 // indirect
-	golang.org/x/exp v0.0.0-20250305212735-054e65f0b394 // indirect
-	golang.org/x/sys v0.31.0 // indirect
+	github.com/petermattis/goid v0.0.0-20250508124226-395b08cebbdb // indirect
+	golang.org/x/exp v0.0.0-20250506013437-ce4c2cf36ca6 // indirect
+	golang.org/x/sys v0.33.0 // indirect
 )
+
+replace go.mau.fi/util => ./go-util
