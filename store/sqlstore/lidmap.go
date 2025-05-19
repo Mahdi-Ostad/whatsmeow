@@ -14,14 +14,12 @@ import (
 	"slices"
 	"sync"
 
-	"go.mau.fi/util/dbutil"
-
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 )
 
 type CachedLIDMap struct {
-	db *dbutil.Database
+	db *RetryDB
 
 	pnToLIDCache map[string]string
 	lidToPNCache map[string]string
@@ -31,7 +29,7 @@ type CachedLIDMap struct {
 
 var _ store.LIDStore = (*CachedLIDMap)(nil)
 
-func NewCachedLIDMap(db *dbutil.Database) *CachedLIDMap {
+func NewCachedLIDMap(db *RetryDB) *CachedLIDMap {
 	return &CachedLIDMap{
 		db: db,
 
