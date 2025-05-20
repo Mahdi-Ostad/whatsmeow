@@ -408,7 +408,7 @@ const (
 
 	sqliteMigratePNToLIDSessionsQuery = `
 		INSERT INTO whatsmeow_sessions (our_jid, their_id, session)
-		SELECT $1, replace(their_id, $2, $3), session
+		SELECT our_jid, replace(their_id, $2, $3), session
 		FROM whatsmeow_sessions
 		WHERE our_jid=$1 AND their_id LIKE $2 || ':%'
 		ON CONFLICT (our_jid, their_id) DO UPDATE SET session=excluded.session
@@ -432,7 +432,7 @@ const (
 	mssqlDeleteAllIdentityKeysQuery       = `DELETE FROM whatsmeow_identity_keys WHERE our_jid=@p1 AND their_id LIKE @p2`
 	sqliteMigratePNToLIDIdentityKeysQuery = `
 		INSERT INTO whatsmeow_identity_keys (our_jid, their_id, identity)
-		SELECT $1, replace(their_id, $2, $3), identity
+		SELECT our_jid, replace(their_id, $2, $3), identity
 		FROM whatsmeow_identity_keys
 		WHERE our_jid=$1 AND their_id LIKE $2 || ':%'
 		ON CONFLICT (our_jid, their_id) DO UPDATE SET identity=excluded.identity
@@ -452,7 +452,7 @@ const (
     		VALUES (source.our_jid, source.their_id, source.identity);`
 	sqliteMigratePNToLIDSenderKeysQuery = `
 		INSERT INTO whatsmeow_sender_keys (our_jid, chat_id, sender_id, sender_key)
-		SELECT $1, chat_id, replace(sender_id, $2, $3), sender_key
+		SELECT our_jid, chat_id, replace(sender_id, $2, $3), sender_key
 		FROM whatsmeow_sender_keys
 		WHERE our_jid=$1 AND sender_id LIKE $2 || ':%'
 		ON CONFLICT (our_jid, chat_id, sender_id) DO UPDATE SET sender_key=excluded.sender_key
