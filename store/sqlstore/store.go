@@ -428,8 +428,8 @@ const (
     		VALUES (source.our_jid, source.their_id, source.session);`
 	sqliteDeleteAllSenderKeysQuery        = `DELETE FROM whatsmeow_sender_keys WHERE our_jid=$1 AND sender_id LIKE $2`
 	mssqlDeleteAllSenderKeysQuery         = `DELETE FROM whatsmeow_sender_keys WHERE our_jid=@p1 AND sender_id LIKE @p2`
-	sqliteDeleteAllIdentityKeysQuery      = `DELETE FROM whatsmeow_identity_keys WHERE our_jid=$1 AND sender_id LIKE $2`
-	mssqlDeleteAllIdentityKeysQuery       = `DELETE FROM whatsmeow_identity_keys WHERE our_jid=@p1 AND sender_id LIKE @p2`
+	sqliteDeleteAllIdentityKeysQuery      = `DELETE FROM whatsmeow_identity_keys WHERE our_jid=$1 AND their_id LIKE $2`
+	mssqlDeleteAllIdentityKeysQuery       = `DELETE FROM whatsmeow_identity_keys WHERE our_jid=@p1 AND their_id LIKE @p2`
 	sqliteMigratePNToLIDIdentityKeysQuery = `
 		INSERT INTO whatsmeow_identity_keys (our_jid, their_id, identity)
 		SELECT $1, replace(their_id, $2, $3), identity
