@@ -347,7 +347,7 @@ const (
 	mssqlGetIdentityQuery    = `SELECT identity_info FROM whatsmeow_identity_keys WITH (NOLOCK) WHERE our_jid=@p1 AND their_id=@p2`
 )
 
-func (s *SQLStore) PutIdentity(address string, key [32]byte) error {
+func (s *SQLStore) PutIdentity(ctx context.Context, address string, key [32]byte) error {
 	go func() {
 		identityChannel <- identityUpdate{
 			sqlStore: s,
@@ -359,12 +359,12 @@ func (s *SQLStore) PutIdentity(address string, key [32]byte) error {
 	return nil
 }
 
-func (s *SQLStore) DeleteAllIdentities(phone string) error {
-	_, err := s.db.Exec(context.TODO(), deleteAllIdentitiesQuery, s.JID, phone+":%")
+func (s *SQLStore) DeleteAllIdentities(ctx context.Context, phone string) error {
+	_, err := s.db.Exec(ctx, deleteAllIdentitiesQuery, s.JID, phone+":%")
 	return err
 }
 
-func (s *SQLStore) DeleteIdentity(address string) error {
+func (s *SQLStore) DeleteIdentity(ctx context.Context, address string) error {
 	go func() {
 		identityChannel <- identityUpdate{
 			sqlStore: s,
@@ -375,15 +375,13 @@ func (s *SQLStore) DeleteIdentity(address string) error {
 	return nil
 }
 
-func (s *SQLStore) IsTrustedIdentity(address string, key [32]byte) (bool, error) {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
+func (s *SQLStore) IsTrustedIdentity(ctx context.Context, address string, key [32]byte) (bool, error) {
 	var existingIdentity []byte
 	var err error
 	if s.db.Dialect == dbutil.MSSQL {
-		err = s.db.QueryRow(context.TODO(), mssqlGetIdentityQuery, s.JID, address).Scan(&existingIdentity)
+		err = s.db.QueryRow(ctx, mssqlGetIdentityQuery, s.JID, address).Scan(&existingIdentity)
 	} else {
-		err = s.db.QueryRow(context.TODO(), sqliteGetIdentityQuery, s.JID, address).Scan(&existingIdentity)
+		err = s.db.QueryRow(ctx, sqliteGetIdentityQuery, s.JID, address).Scan(&existingIdentity)
 	}
 	if errors.Is(err, sql.ErrNoRows) {
 		// Trust if not known, it'll be saved automatically later
@@ -484,19 +482,19 @@ const (
 	deleteSessionQuery     = `DELETE FROM whatsmeow_sessions WHERE our_jid=@p1 AND their_id=@p2`
 )
 
-func (s *SQLStore) GetSession(address string) (session []byte, err error) {
-	err = s.db.QueryRow(context.TODO(), getSessionQuery, s.JID, address).Scan(&session)
+func (s *SQLStore) GetSession(ctx context.Context, address string) (session []byte, err error) {
+	err = s.db.QueryRow(ctx, getSessionQuery, s.JID, address).Scan(&session)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = nil
 	}
 	return
 }
 
-func (s *SQLStore) HasSession(address string) (has bool, err error) {
+func (s *SQLStore) HasSession(ctx context.Context, address string) (has bool, err error) {
 	if s.db.Dialect == dbutil.MSSQL {
-		err = s.db.QueryRow(context.TODO(), mssqlHasSessionQuery, s.JID, address).Scan(&has)
+		err = s.db.QueryRow(ctx, mssqlHasSessionQuery, s.JID, address).Scan(&has)
 	} else {
-		err = s.db.QueryRow(context.TODO(), sqliteHasSessionQuery, s.JID, address).Scan(&has)
+		err = s.db.QueryRow(ctx, sqliteHasSessionQuery, s.JID, address).Scan(&has)
 	}
 	if errors.Is(err, sql.ErrNoRows) {
 		err = nil
@@ -504,7 +502,7 @@ func (s *SQLStore) HasSession(address string) (has bool, err error) {
 	return
 }
 
-func (s *SQLStore) PutSession(address string, session []byte) error {
+func (s *SQLStore) PutSession(ctx context.Context, address string, session []byte) error {
 	go func() {
 		sessionChannel <- sessionUpdate{
 			sqlStore: s,
@@ -516,8 +514,8 @@ func (s *SQLStore) PutSession(address string, session []byte) error {
 	return nil
 }
 
-func (s *SQLStore) DeleteAllSessions(phone string) error {
-	return s.deleteAllSessions(context.TODO(), phone)
+func (s *SQLStore) DeleteAllSessions(ctx context.Context, phone string) error {
+	return s.deleteAllSessions(ctx, phone)
 }
 
 func (s *SQLStore) deleteAllSessions(ctx context.Context, phone string) error {
@@ -543,7 +541,7 @@ func (s *SQLStore) deleteAllIdentityKeys(ctx context.Context, phone string) erro
 	return err
 }
 
-func (s *SQLStore) DeleteSession(address string) error {
+func (s *SQLStore) DeleteSession(ctx context.Context, address string) error {
 	go func() {
 		sessionChannel <- sessionUpdate{
 			sqlStore: s,
@@ -642,48 +640,48 @@ const (
 	mssqlGetUploadedPreKeyCountQuery  = `SELECT COUNT(*) FROM whatsmeow_pre_keys WITH (NOLOCK) WHERE jid=@p1 AND uploaded=1`
 )
 
-func (s *SQLStore) genOnePreKey(id uint32, markUploaded bool) (*keys.PreKey, error) {
+func (s *SQLStore) genOnePreKey(ctx context.Context, id uint32, markUploaded bool) (*keys.PreKey, error) {
 	key := keys.NewPreKey(id)
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	var err error
 	if s.db.Dialect == dbutil.MSSQL {
-		_, err = s.db.Exec(context.TODO(), mssqlInsertPreKeyQuery, s.JID, key.KeyID, key.Priv[:], markUploaded)
+		_, err = s.db.Exec(ctx, mssqlInsertPreKeyQuery, s.JID, key.KeyID, key.Priv[:], markUploaded)
 	} else {
-		_, err = s.db.Exec(context.TODO(), sqliteInsertPreKeyQuery, s.JID, key.KeyID, key.Priv[:], markUploaded)
+		_, err = s.db.Exec(ctx, sqliteInsertPreKeyQuery, s.JID, key.KeyID, key.Priv[:], markUploaded)
 	}
 
 	return key, err
 }
 
-func (s *SQLStore) getNextPreKeyID() (uint32, error) {
+func (s *SQLStore) getNextPreKeyID(ctx context.Context) (uint32, error) {
 	var lastKeyID sql.NullInt32
-	err := s.db.QueryRow(context.TODO(), getLastPreKeyIDQuery, s.JID).Scan(&lastKeyID)
+	err := s.db.QueryRow(ctx, getLastPreKeyIDQuery, s.JID).Scan(&lastKeyID)
 	if err != nil {
 		return 0, fmt.Errorf("failed to query next prekey ID: %w", err)
 	}
 	return uint32(lastKeyID.Int32) + 1, nil
 }
 
-func (s *SQLStore) GenOnePreKey() (*keys.PreKey, error) {
+func (s *SQLStore) GenOnePreKey(ctx context.Context) (*keys.PreKey, error) {
 	s.preKeyLock.Lock()
 	defer s.preKeyLock.Unlock()
-	nextKeyID, err := s.getNextPreKeyID()
+	nextKeyID, err := s.getNextPreKeyID(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return s.genOnePreKey(nextKeyID, true)
+	return s.genOnePreKey(ctx, nextKeyID, true)
 }
 
-func (s *SQLStore) GetOrGenPreKeys(count uint32) ([]*keys.PreKey, error) {
+func (s *SQLStore) GetOrGenPreKeys(ctx context.Context, count uint32) ([]*keys.PreKey, error) {
 	s.preKeyLock.Lock()
 	defer s.preKeyLock.Unlock()
 	var err error
 	var res dbutil.Rows
 	if s.db.Dialect == dbutil.MSSQL {
-		res, err = s.db.Query(context.TODO(), mssqlGetUnuploadedPreKeysQuery, count, s.JID)
+		res, err = s.db.Query(ctx, mssqlGetUnuploadedPreKeysQuery, count, s.JID)
 	} else {
-		res, err = s.db.Query(context.TODO(), sqliteGetUnuploadedPreKeysQuery, s.JID, count)
+		res, err = s.db.Query(ctx, sqliteGetUnuploadedPreKeysQuery, s.JID, count)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to query existing prekeys: %w", err)
@@ -703,12 +701,12 @@ func (s *SQLStore) GetOrGenPreKeys(count uint32) ([]*keys.PreKey, error) {
 
 	if existingCount < uint32(len(newKeys)) {
 		var nextKeyID uint32
-		nextKeyID, err = s.getNextPreKeyID()
+		nextKeyID, err = s.getNextPreKeyID(ctx)
 		if err != nil {
 			return nil, err
 		}
 		for i := existingCount; i < count; i++ {
-			newKeys[i], err = s.genOnePreKey(nextKeyID, false)
+			newKeys[i], err = s.genOnePreKey(ctx, nextKeyID, false)
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate prekey: %w", err)
 			}
@@ -736,14 +734,14 @@ func scanPreKey(row dbutil.Scannable) (*keys.PreKey, error) {
 	}, nil
 }
 
-func (s *SQLStore) GetPreKey(id uint32) (*keys.PreKey, error) {
+func (s *SQLStore) GetPreKey(ctx context.Context, id uint32) (*keys.PreKey, error) {
 	if s.db.Dialect == dbutil.MSSQL {
-		return scanPreKey(s.db.QueryRow(context.TODO(), mssqlGetPreKeyQuery, s.JID, id))
+		return scanPreKey(s.db.QueryRow(ctx, mssqlGetPreKeyQuery, s.JID, id))
 	}
-	return scanPreKey(s.db.QueryRow(context.TODO(), sqliteGetPreKeyQuery, s.JID, id))
+	return scanPreKey(s.db.QueryRow(ctx, sqliteGetPreKeyQuery, s.JID, id))
 }
 
-func (s *SQLStore) RemovePreKey(id uint32) error {
+func (s *SQLStore) RemovePreKey(ctx context.Context, id uint32) error {
 	go func() {
 		removePreKeyChannel <- removePreKeyUpdate{
 			sqlStore: s,
@@ -753,23 +751,23 @@ func (s *SQLStore) RemovePreKey(id uint32) error {
 	return nil
 }
 
-func (s *SQLStore) MarkPreKeysAsUploaded(upToID uint32) error {
+func (s *SQLStore) MarkPreKeysAsUploaded(ctx context.Context, upToID uint32) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	if s.db.Dialect == dbutil.MSSQL {
-		_, err := s.db.Exec(context.TODO(), mssqlMarkPreKeysAsUploadedQuery, s.JID, upToID)
+		_, err := s.db.Exec(ctx, mssqlMarkPreKeysAsUploadedQuery, s.JID, upToID)
 		return err
 	}
-	_, err := s.db.Exec(context.TODO(), sqliteMarkPreKeysAsUploadedQuery, s.JID, upToID)
+	_, err := s.db.Exec(ctx, sqliteMarkPreKeysAsUploadedQuery, s.JID, upToID)
 	return err
 }
 
-func (s *SQLStore) UploadedPreKeyCount() (count int, err error) {
+func (s *SQLStore) UploadedPreKeyCount(ctx context.Context) (count int, err error) {
 	if s.db.Dialect == dbutil.MSSQL {
-		err = s.db.QueryRow(context.TODO(), mssqlGetUploadedPreKeyCountQuery, s.JID).Scan(&count)
+		err = s.db.QueryRow(ctx, mssqlGetUploadedPreKeyCountQuery, s.JID).Scan(&count)
 		return
 	}
-	err = s.db.QueryRow(context.TODO(), sqliteGetUploadedPreKeyCountQuery, s.JID).Scan(&count)
+	err = s.db.QueryRow(ctx, sqliteGetUploadedPreKeyCountQuery, s.JID).Scan(&count)
 	return
 }
 
@@ -791,7 +789,7 @@ const (
 	`
 )
 
-func (s *SQLStore) PutSenderKey(group, user string, session []byte) error {
+func (s *SQLStore) PutSenderKey(ctx context.Context, group, user string, session []byte) error {
 	go func() {
 		senderkeysChannel <- senderkeyUpdate{
 			group:    group,
@@ -803,8 +801,8 @@ func (s *SQLStore) PutSenderKey(group, user string, session []byte) error {
 	return nil
 }
 
-func (s *SQLStore) GetSenderKey(group, user string) (key []byte, err error) {
-	err = s.db.QueryRow(context.TODO(), getSenderKeyQuery, s.JID, group, user).Scan(&key)
+func (s *SQLStore) GetSenderKey(ctx context.Context, group, user string) (key []byte, err error) {
+	err = s.db.QueryRow(ctx, getSenderKeyQuery, s.JID, group, user).Scan(&key)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = nil
 	}
@@ -834,24 +832,24 @@ const (
 	mssqlGetLatestAppStateSyncKeyIDQuery  = `SELECT TOP 1 key_id FROM whatsmeow_app_state_sync_keys WITH (NOLOCK) WHERE jid=@p1 ORDER BY timestamp_info DESC`
 )
 
-func (s *SQLStore) PutAppStateSyncKey(id []byte, key store.AppStateSyncKey) error {
+func (s *SQLStore) PutAppStateSyncKey(ctx context.Context, id []byte, key store.AppStateSyncKey) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	if s.db.Dialect == dbutil.MSSQL {
-		_, err := s.db.Exec(context.TODO(), mssqlPutAppStateSyncKeyQuery, s.JID, id, key.Data, key.Timestamp, key.Fingerprint)
+		_, err := s.db.Exec(ctx, mssqlPutAppStateSyncKeyQuery, s.JID, id, key.Data, key.Timestamp, key.Fingerprint)
 		return err
 	}
-	_, err := s.db.Exec(context.TODO(), sqlitePutAppStateSyncKeyQuery, s.JID, id, key.Data, key.Timestamp, key.Fingerprint)
+	_, err := s.db.Exec(ctx, sqlitePutAppStateSyncKeyQuery, s.JID, id, key.Data, key.Timestamp, key.Fingerprint)
 	return err
 }
 
-func (s *SQLStore) GetAppStateSyncKey(id []byte) (*store.AppStateSyncKey, error) {
+func (s *SQLStore) GetAppStateSyncKey(ctx context.Context, id []byte) (*store.AppStateSyncKey, error) {
 	var key store.AppStateSyncKey
 	var err error
 	if s.db.Dialect == dbutil.MSSQL {
-		err = s.db.QueryRow(context.TODO(), mssqlGetAppStateSyncKeyQuery, s.JID, id).Scan(&key.Data, &key.Timestamp, &key.Fingerprint)
+		err = s.db.QueryRow(ctx, mssqlGetAppStateSyncKeyQuery, s.JID, id).Scan(&key.Data, &key.Timestamp, &key.Fingerprint)
 	} else {
-		err = s.db.QueryRow(context.TODO(), sqliteGetAppStateSyncKeyQuery, s.JID, id).Scan(&key.Data, &key.Timestamp, &key.Fingerprint)
+		err = s.db.QueryRow(ctx, sqliteGetAppStateSyncKeyQuery, s.JID, id).Scan(&key.Data, &key.Timestamp, &key.Fingerprint)
 	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -859,13 +857,13 @@ func (s *SQLStore) GetAppStateSyncKey(id []byte) (*store.AppStateSyncKey, error)
 	return &key, err
 }
 
-func (s *SQLStore) GetLatestAppStateSyncKeyID() ([]byte, error) {
+func (s *SQLStore) GetLatestAppStateSyncKeyID(ctx context.Context) ([]byte, error) {
 	var keyID []byte
 	var err error
 	if s.db.Dialect == dbutil.MSSQL {
-		err = s.db.QueryRow(context.TODO(), mssqlGetLatestAppStateSyncKeyIDQuery, s.JID).Scan(&keyID)
+		err = s.db.QueryRow(ctx, mssqlGetLatestAppStateSyncKeyIDQuery, s.JID).Scan(&keyID)
 	} else {
-		err = s.db.QueryRow(context.TODO(), sqliteGetLatestAppStateSyncKeyIDQuery, s.JID).Scan(&keyID)
+		err = s.db.QueryRow(ctx, sqliteGetLatestAppStateSyncKeyIDQuery, s.JID).Scan(&keyID)
 	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -899,23 +897,23 @@ const (
 	mssqlGetAppStateMutationMACQuery        = `SELECT TOP 1 value_mac FROM whatsmeow_app_state_mutation_macs WITH (NOLOCK) WHERE jid=@p1 AND name=@p2 AND index_mac=@p3 ORDER BY version_info DESC`
 )
 
-func (s *SQLStore) PutAppStateVersion(name string, version uint64, hash [128]byte) error {
+func (s *SQLStore) PutAppStateVersion(ctx context.Context, name string, version uint64, hash [128]byte) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	if s.db.Dialect == dbutil.MSSQL {
-		_, err := s.db.Exec(context.TODO(), mssqlPutAppStateVersionQuery, s.JID, name, version, hash[:])
+		_, err := s.db.Exec(ctx, mssqlPutAppStateVersionQuery, s.JID, name, version, hash[:])
 		return err
 	}
-	_, err := s.db.Exec(context.TODO(), sqlitePutAppStateVersionQuery, s.JID, name, version, hash[:])
+	_, err := s.db.Exec(ctx, sqlitePutAppStateVersionQuery, s.JID, name, version, hash[:])
 	return err
 }
 
-func (s *SQLStore) GetAppStateVersion(name string) (version uint64, hash [128]byte, err error) {
+func (s *SQLStore) GetAppStateVersion(ctx context.Context, name string) (version uint64, hash [128]byte, err error) {
 	var uncheckedHash []byte
 	if s.db.Dialect == dbutil.MSSQL {
-		err = s.db.QueryRow(context.TODO(), mssqlGetAppStateVersionQuery, s.JID, name).Scan(&version, &uncheckedHash)
+		err = s.db.QueryRow(ctx, mssqlGetAppStateVersionQuery, s.JID, name).Scan(&version, &uncheckedHash)
 	} else {
-		err = s.db.QueryRow(context.TODO(), sqliteGetAppStateVersionQuery, s.JID, name).Scan(&version, &uncheckedHash)
+		err = s.db.QueryRow(ctx, sqliteGetAppStateVersionQuery, s.JID, name).Scan(&version, &uncheckedHash)
 	}
 	if errors.Is(err, sql.ErrNoRows) {
 		// version will be 0 and hash will be an empty array, which is the correct initial state
@@ -932,8 +930,8 @@ func (s *SQLStore) GetAppStateVersion(name string) (version uint64, hash [128]by
 	return
 }
 
-func (s *SQLStore) DeleteAppStateVersion(name string) error {
-	_, err := s.db.Exec(context.TODO(), deleteAppStateVersionQuery, s.JID, name)
+func (s *SQLStore) DeleteAppStateVersion(ctx context.Context, name string) error {
+	_, err := s.db.Exec(ctx, deleteAppStateVersionQuery, s.JID, name)
 	return err
 }
 
@@ -963,12 +961,12 @@ func (s *SQLStore) putAppStateMutationMACs(ctx context.Context, name string, ver
 
 const mutationBatchSize = 400
 
-func (s *SQLStore) PutAppStateMutationMACs(name string, version uint64, mutations []store.AppStateMutationMAC) error {
+func (s *SQLStore) PutAppStateMutationMACs(ctx context.Context, name string, version uint64, mutations []store.AppStateMutationMAC) error {
 	if len(mutations) == 0 {
 		return nil
 	}
 	bulkimportStr := mssql.CopyIn("whatsmeow_app_state_mutation_macs", mssql.BulkOptions{}, "jid", "name", "version_info", "index_mac", "value_mac")
-	stmt, err := s.db.RawDB.PrepareContext(context.TODO(), bulkimportStr)
+	stmt, err := s.db.RawDB.PrepareContext(ctx, bulkimportStr)
 	if err != nil {
 		return fmt.Errorf("failed to prepare bulk: %w", err)
 	}
@@ -979,12 +977,12 @@ func (s *SQLStore) PutAppStateMutationMACs(name string, version uint64, mutation
 	return err
 }
 
-func (s *SQLStore) DeleteAppStateMutationMACs(name string, indexMACs [][]byte) (err error) {
+func (s *SQLStore) DeleteAppStateMutationMACs(ctx context.Context, name string, indexMACs [][]byte) (err error) {
 	if len(indexMACs) == 0 {
 		return
 	}
 	if s.db.Dialect == dbutil.Postgres && PostgresArrayWrapper != nil {
-		_, err = s.db.Exec(context.TODO(), deleteAppStateMutationMACsQueryPostgres, s.JID, name, PostgresArrayWrapper(indexMACs))
+		_, err = s.db.Exec(ctx, deleteAppStateMutationMACsQueryPostgres, s.JID, name, PostgresArrayWrapper(indexMACs))
 	} else {
 		args := make([]any, 2+len(indexMACs))
 		args[0] = s.JID
@@ -994,16 +992,16 @@ func (s *SQLStore) DeleteAppStateMutationMACs(name string, indexMACs [][]byte) (
 			args[2+i] = item
 			queryParts[i] = fmt.Sprintf("@p%d", i+3)
 		}
-		_, err = s.db.Exec(context.TODO(), deleteAppStateMutationMACsQueryGeneric+"("+strings.Join(queryParts, ",")+")", args...)
+		_, err = s.db.Exec(ctx, deleteAppStateMutationMACsQueryGeneric+"("+strings.Join(queryParts, ",")+")", args...)
 	}
 	return
 }
 
-func (s *SQLStore) GetAppStateMutationMAC(name string, indexMAC []byte) (valueMAC []byte, err error) {
+func (s *SQLStore) GetAppStateMutationMAC(ctx context.Context, name string, indexMAC []byte) (valueMAC []byte, err error) {
 	if s.db.Dialect == dbutil.MSSQL {
-		err = s.db.QueryRow(context.TODO(), mssqlGetAppStateMutationMACQuery, s.JID, name, indexMAC).Scan(&valueMAC)
+		err = s.db.QueryRow(ctx, mssqlGetAppStateMutationMACQuery, s.JID, name, indexMAC).Scan(&valueMAC)
 	} else {
-		err = s.db.QueryRow(context.TODO(), sqliteGetAppStateMutationMACQuery, s.JID, name, indexMAC).Scan(&valueMAC)
+		err = s.db.QueryRow(ctx, sqliteGetAppStateMutationMACQuery, s.JID, name, indexMAC).Scan(&valueMAC)
 	}
 	if errors.Is(err, sql.ErrNoRows) {
 		err = nil
@@ -1077,19 +1075,19 @@ const (
 	`
 )
 
-func (s *SQLStore) PutPushName(user types.JID, pushName string) (bool, string, error) {
+func (s *SQLStore) PutPushName(ctx context.Context, user types.JID, pushName string) (bool, string, error) {
 	s.contactCacheLock.Lock()
 	defer s.contactCacheLock.Unlock()
 
-	cached, err := s.getContact(user)
+	cached, err := s.getContact(ctx, user)
 	if err != nil {
 		return false, "", err
 	}
 	if cached.PushName != pushName {
 		if s.db.Dialect == dbutil.MSSQL {
-			_, err = s.db.Exec(context.TODO(), mssqlPutPushNameQuery, s.JID, user, pushName)
+			_, err = s.db.Exec(ctx, mssqlPutPushNameQuery, s.JID, user, pushName)
 		} else {
-			_, err = s.db.Exec(context.TODO(), sqlitePutPushNameQuery, s.JID, user, pushName)
+			_, err = s.db.Exec(ctx, sqlitePutPushNameQuery, s.JID, user, pushName)
 		}
 		if err != nil {
 			return false, "", err
@@ -1102,19 +1100,19 @@ func (s *SQLStore) PutPushName(user types.JID, pushName string) (bool, string, e
 	return false, "", nil
 }
 
-func (s *SQLStore) PutBusinessName(user types.JID, businessName string) (bool, string, error) {
+func (s *SQLStore) PutBusinessName(ctx context.Context, user types.JID, businessName string) (bool, string, error) {
 	s.contactCacheLock.Lock()
 	defer s.contactCacheLock.Unlock()
 
-	cached, err := s.getContact(user)
+	cached, err := s.getContact(ctx, user)
 	if err != nil {
 		return false, "", err
 	}
 	if cached.BusinessName != businessName {
 		if s.db.Dialect == dbutil.MSSQL {
-			_, err = s.db.Exec(context.TODO(), mssqlPutBusinessNameQuery, s.JID, user, businessName)
+			_, err = s.db.Exec(ctx, mssqlPutBusinessNameQuery, s.JID, user, businessName)
 		} else {
-			_, err = s.db.Exec(context.TODO(), sqlitePutBusinessNameQuery, s.JID, user, businessName)
+			_, err = s.db.Exec(ctx, sqlitePutBusinessNameQuery, s.JID, user, businessName)
 		}
 		if err != nil {
 			return false, "", err
@@ -1127,19 +1125,19 @@ func (s *SQLStore) PutBusinessName(user types.JID, businessName string) (bool, s
 	return false, "", nil
 }
 
-func (s *SQLStore) PutContactName(user types.JID, firstName, fullName string) error {
+func (s *SQLStore) PutContactName(ctx context.Context, user types.JID, firstName, fullName string) error {
 	s.contactCacheLock.Lock()
 	defer s.contactCacheLock.Unlock()
 
-	cached, err := s.getContact(user)
+	cached, err := s.getContact(ctx, user)
 	if err != nil {
 		return err
 	}
 	if cached.FirstName != firstName || cached.FullName != fullName {
 		if s.db.Dialect == dbutil.MSSQL {
-			_, err = s.db.Exec(context.TODO(), mssqlPutContactNameQuery, s.JID, user, firstName, fullName)
+			_, err = s.db.Exec(ctx, mssqlPutContactNameQuery, s.JID, user, firstName, fullName)
 		} else {
-			_, err = s.db.Exec(context.TODO(), sqlitePutContactNameQuery, s.JID, user, firstName, fullName)
+			_, err = s.db.Exec(ctx, sqlitePutContactNameQuery, s.JID, user, firstName, fullName)
 		}
 		if err != nil {
 			return err
@@ -1188,7 +1186,7 @@ func (s *SQLStore) putContactNamesBatch(ctx context.Context, contacts []store.Co
 	return err
 }
 
-func (s *SQLStore) PutAllContactNames(contacts []store.ContactEntry) error {
+func (s *SQLStore) PutAllContactNames(ctx context.Context, contacts []store.ContactEntry) error {
 	go func() {
 		contactsChannel <- contactUpdate{
 			sqlStore: s,
@@ -1198,14 +1196,14 @@ func (s *SQLStore) PutAllContactNames(contacts []store.ContactEntry) error {
 	return nil
 }
 
-func (s *SQLStore) getContact(user types.JID) (*types.ContactInfo, error) {
+func (s *SQLStore) getContact(ctx context.Context, user types.JID) (*types.ContactInfo, error) {
 	cached, ok := s.contactCache[user]
 	if ok {
 		return cached, nil
 	}
 
 	var first, full, push, business sql.NullString
-	err := s.db.QueryRow(context.TODO(), getContactQuery, s.JID, user).Scan(&first, &full, &push, &business)
+	err := s.db.QueryRow(ctx, getContactQuery, s.JID, user).Scan(&first, &full, &push, &business)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
@@ -1220,9 +1218,9 @@ func (s *SQLStore) getContact(user types.JID) (*types.ContactInfo, error) {
 	return info, nil
 }
 
-func (s *SQLStore) GetContact(user types.JID) (types.ContactInfo, error) {
+func (s *SQLStore) GetContact(ctx context.Context, user types.JID) (types.ContactInfo, error) {
 	s.contactCacheLock.Lock()
-	info, err := s.getContact(user)
+	info, err := s.getContact(ctx, user)
 	s.contactCacheLock.Unlock()
 	if err != nil {
 		return types.ContactInfo{}, err
@@ -1230,10 +1228,10 @@ func (s *SQLStore) GetContact(user types.JID) (types.ContactInfo, error) {
 	return *info, nil
 }
 
-func (s *SQLStore) GetAllContacts() (map[types.JID]types.ContactInfo, error) {
+func (s *SQLStore) GetAllContacts(ctx context.Context) (map[types.JID]types.ContactInfo, error) {
 	s.contactCacheLock.Lock()
 	defer s.contactCacheLock.Unlock()
-	rows, err := s.db.Query(context.TODO(), getAllContactsQuery, s.JID)
+	rows, err := s.db.Query(ctx, getAllContactsQuery, s.JID)
 	if err != nil {
 		return nil, err
 	}
@@ -1278,7 +1276,7 @@ const (
 	`
 )
 
-func (s *SQLStore) PutMutedUntil(chat types.JID, mutedUntil time.Time) error {
+func (s *SQLStore) PutMutedUntil(ctx context.Context, chat types.JID, mutedUntil time.Time) error {
 	var val int64
 	if !mutedUntil.IsZero() {
 		val = mutedUntil.Unix()
@@ -1286,38 +1284,38 @@ func (s *SQLStore) PutMutedUntil(chat types.JID, mutedUntil time.Time) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	if s.db.Dialect == dbutil.MSSQL {
-		_, err := s.db.Exec(context.TODO(), fmt.Sprintf(mssqlPutChatSettingQuery, "muted_until"), s.JID, chat, val)
+		_, err := s.db.Exec(ctx, fmt.Sprintf(mssqlPutChatSettingQuery, "muted_until"), s.JID, chat, val)
 		return err
 	}
-	_, err := s.db.Exec(context.TODO(), fmt.Sprintf(sqlitePutChatSettingQuery, "muted_until"), s.JID, chat, val)
+	_, err := s.db.Exec(ctx, fmt.Sprintf(sqlitePutChatSettingQuery, "muted_until"), s.JID, chat, val)
 	return err
 }
 
-func (s *SQLStore) PutPinned(chat types.JID, pinned bool) error {
+func (s *SQLStore) PutPinned(ctx context.Context, chat types.JID, pinned bool) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	if s.db.Dialect == dbutil.MSSQL {
-		_, err := s.db.Exec(context.TODO(), fmt.Sprintf(mssqlPutChatSettingQuery, "pinned"), s.JID, chat, pinned)
+		_, err := s.db.Exec(ctx, fmt.Sprintf(mssqlPutChatSettingQuery, "pinned"), s.JID, chat, pinned)
 		return err
 	}
-	_, err := s.db.Exec(context.TODO(), fmt.Sprintf(sqlitePutChatSettingQuery, "pinned"), s.JID, chat, pinned)
+	_, err := s.db.Exec(ctx, fmt.Sprintf(sqlitePutChatSettingQuery, "pinned"), s.JID, chat, pinned)
 	return err
 }
 
-func (s *SQLStore) PutArchived(chat types.JID, archived bool) error {
+func (s *SQLStore) PutArchived(ctx context.Context, chat types.JID, archived bool) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	if s.db.Dialect == dbutil.MSSQL {
-		_, err := s.db.Exec(context.TODO(), fmt.Sprintf(mssqlPutChatSettingQuery, "archived"), s.JID, chat, archived)
+		_, err := s.db.Exec(ctx, fmt.Sprintf(mssqlPutChatSettingQuery, "archived"), s.JID, chat, archived)
 		return err
 	}
-	_, err := s.db.Exec(context.TODO(), fmt.Sprintf(sqlitePutChatSettingQuery, "archived"), s.JID, chat, archived)
+	_, err := s.db.Exec(ctx, fmt.Sprintf(sqlitePutChatSettingQuery, "archived"), s.JID, chat, archived)
 	return err
 }
 
-func (s *SQLStore) GetChatSettings(chat types.JID) (settings types.LocalChatSettings, err error) {
+func (s *SQLStore) GetChatSettings(ctx context.Context, chat types.JID) (settings types.LocalChatSettings, err error) {
 	var mutedUntil int64
-	err = s.db.QueryRow(context.TODO(), getChatSettingsQuery, s.JID, chat).Scan(&mutedUntil, &settings.Pinned, &settings.Archived)
+	err = s.db.QueryRow(ctx, getChatSettingsQuery, s.JID, chat).Scan(&mutedUntil, &settings.Pinned, &settings.Archived)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = nil
 	} else if err != nil {
@@ -1357,11 +1355,12 @@ const (
 	`
 )
 
-func (s *SQLStore) PutMessageSecrets(inserts []store.MessageSecretInsert) (err error) {
+func (s *SQLStore) PutMessageSecrets(ctx context.Context, inserts []store.MessageSecretInsert) (err error) {
 	if len(inserts) == 0 {
 		return nil
 	}
-	dt := time.Now()
+	return s.db.DoTxn(ctx, nil, func(ctx context.Context) error {
+		dt := time.Now()
 	_, err = s.db.Exec(context.TODO(), fmt.Sprintf(`CREATE TABLE staging_messagesecrets_%d (
 			our_jid    VARCHAR(300),
 			chat_jid   VARCHAR(200),
@@ -1399,10 +1398,11 @@ func (s *SQLStore) PutMessageSecrets(inserts []store.MessageSecretInsert) (err e
 	if err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
-	return err
+		return nil
+	})
 }
 
-func (s *SQLStore) PutMessageSecret(chat, sender types.JID, id types.MessageID, secret []byte) (err error) {
+func (s *SQLStore) PutMessageSecret(ctx context.Context, chat, sender types.JID, id types.MessageID, secret []byte) (err error) {
 	go func() {
 		putMessageSecretChannel <- putMessageSecretUpdate{
 			sqlStore: s,
@@ -1415,11 +1415,11 @@ func (s *SQLStore) PutMessageSecret(chat, sender types.JID, id types.MessageID, 
 	return nil
 }
 
-func (s *SQLStore) GetMessageSecret(chat, sender types.JID, id types.MessageID) (secret []byte, err error) {
+func (s *SQLStore) GetMessageSecret(ctx context.Context, chat, sender types.JID, id types.MessageID) (secret []byte, err error) {
 	if s.db.Dialect == dbutil.MSSQL {
-		err = s.db.QueryRow(context.TODO(), mssqlGetMsgSecret, s.JID, chat.ToNonAD(), sender.ToNonAD(), id).Scan(&secret)
+		err = s.db.QueryRow(ctx, mssqlGetMsgSecret, s.JID, chat.ToNonAD(), sender.ToNonAD(), id).Scan(&secret)
 	} else {
-		err = s.db.QueryRow(context.TODO(), sqliteGetMsgSecret, s.JID, chat.ToNonAD(), sender.ToNonAD(), id).Scan(&secret)
+		err = s.db.QueryRow(ctx, sqliteGetMsgSecret, s.JID, chat.ToNonAD(), sender.ToNonAD(), id).Scan(&secret)
 	}
 	if errors.Is(err, sql.ErrNoRows) {
 		err = nil
@@ -1447,9 +1447,9 @@ const (
 	mssqlGetPrivacyToken  = `SELECT token, timestamp_info FROM whatsmeow_privacy_tokens WITH (NOLOCK) WHERE our_jid=@p1 AND their_jid=@p2`
 )
 
-func (s *SQLStore) PutPrivacyTokens(tokens ...store.PrivacyToken) error {
+func (s *SQLStore) PutPrivacyTokens(ctx context.Context, tokens ...store.PrivacyToken) error {
 	dt := time.Now()
-	_, err := s.db.Exec(context.TODO(), fmt.Sprintf(`CREATE TABLE staging_privacytokens_%d (
+	_, err := s.db.Exec(ctx, fmt.Sprintf(`CREATE TABLE staging_privacytokens_%d (
 			our_jid   VARCHAR(300),
 			their_jid VARCHAR(300),
 			token     VARBINARY(max)  NOT NULL,
@@ -1460,7 +1460,7 @@ func (s *SQLStore) PutPrivacyTokens(tokens ...store.PrivacyToken) error {
 		return fmt.Errorf("failed to create table: %w", err)
 	}
 	bulkImportStr := mssql.CopyIn(fmt.Sprintf("staging_privacytokens_%d", dt.UnixMilli()), mssql.BulkOptions{}, "our_jid", "their_jid", "token", "timestamp_info")
-	stmt, err := s.db.RawDB.PrepareContext(context.TODO(), bulkImportStr)
+	stmt, err := s.db.RawDB.PrepareContext(ctx, bulkImportStr)
 	if err != nil {
 		return fmt.Errorf("failed to prepare bulk: %w", err)
 	}
@@ -1474,7 +1474,7 @@ func (s *SQLStore) PutPrivacyTokens(tokens ...store.PrivacyToken) error {
 	if err != nil {
 		return fmt.Errorf("failed to execute bulk: %w", err)
 	}
-	_, err = s.db.Exec(context.TODO(), fmt.Sprintf(`MERGE INTO whatsmeow_privacy_tokens AS target 
+	_, err = s.db.Exec(ctx, fmt.Sprintf(`MERGE INTO whatsmeow_privacy_tokens AS target 
 		USING staging_privacytokens_%d AS source 
 		ON target.our_jid = source.our_jid AND target.their_jid = source.their_jid
 		WHEN MATCHED THEN
@@ -1485,7 +1485,7 @@ func (s *SQLStore) PutPrivacyTokens(tokens ...store.PrivacyToken) error {
 	if err != nil {
 		return fmt.Errorf("failed to merge bulk: %w", err)
 	}
-	_, err = s.db.Exec(context.TODO(), fmt.Sprintf("DROP TABLE staging_privacytokens_%d", dt.UnixMilli()))
+	_, err = s.db.Exec(ctx, fmt.Sprintf("DROP TABLE staging_privacytokens_%d", dt.UnixMilli()))
 	if err != nil {
 		return fmt.Errorf("failed to merge bulk: %w", err)
 	}
@@ -1495,15 +1495,15 @@ func (s *SQLStore) PutPrivacyTokens(tokens ...store.PrivacyToken) error {
 	return err
 }
 
-func (s *SQLStore) GetPrivacyToken(user types.JID) (*store.PrivacyToken, error) {
+func (s *SQLStore) GetPrivacyToken(ctx context.Context, user types.JID) (*store.PrivacyToken, error) {
 	var token store.PrivacyToken
 	token.User = user.ToNonAD()
 	var ts int64
 	var err error
 	if s.db.Dialect == dbutil.MSSQL {
-		err = s.db.QueryRow(context.TODO(), mssqlGetPrivacyToken, s.JID, token.User).Scan(&token.Token, &ts)
+		err = s.db.QueryRow(ctx, mssqlGetPrivacyToken, s.JID, token.User).Scan(&token.Token, &ts)
 	} else {
-		err = s.db.QueryRow(context.TODO(), sqliteGetPrivacyToken, s.JID, token.User).Scan(&token.Token, &ts)
+		err = s.db.QueryRow(ctx, sqliteGetPrivacyToken, s.JID, token.User).Scan(&token.Token, &ts)
 	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -1761,10 +1761,8 @@ func (s *SQLStore) PutBufferedEvent(ctx context.Context, ciphertextHash [32]byte
 }
 
 func (s *SQLStore) DoDecryptionTxn(ctx context.Context, fn func(context.Context) error) error {
-	return fn(ctx)
-	// TODO actually use transaction once libsignal-protocol-go passes them through
-	//ctx = context.WithValue(ctx, dbutil.ContextKeyDoTxnCallerSkip, 2)
-	//return s.db.DoTxn(ctx, nil, fn)
+	ctx = context.WithValue(ctx, dbutil.ContextKeyDoTxnCallerSkip, 2)
+	return s.db.DoTxn(ctx, nil, fn)
 }
 
 func (s *SQLStore) ClearBufferedEventPlaintext(ctx context.Context, ciphertextHash [32]byte) error {
