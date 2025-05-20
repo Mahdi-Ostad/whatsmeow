@@ -1710,22 +1710,37 @@ func (s *SQLStore) DeleteMessageNode(ref int) (err error) {
 }
 
 const (
-	getBufferedEventQuery = `
+	sqliteGetBufferedEventQuery = `
 		SELECT plaintext, server_timestamp, insert_timestamp FROM whatsmeow_event_buffer WHERE our_jid = $1 AND ciphertext_hash = $2
 	`
-	putBufferedEventQuery = `
+	mssqlGetBufferedEventQuery = `
+		SELECT plaintext, server_timestamp, insert_timestamp FROM whatsmeow_event_buffer WHERE our_jid = @p1 AND ciphertext_hash = @p2
+	`
+	sqlitePutBufferedEventQuery = `
 		INSERT INTO whatsmeow_event_buffer (our_jid, ciphertext_hash, plaintext, server_timestamp, insert_timestamp)
 		VALUES ($1, $2, $3, $4, $5)
 	`
-	clearBufferedEventPlaintextQuery = `
+	mssqlPutBufferedEventQuery = `
+		INSERT INTO whatsmeow_event_buffer (our_jid, ciphertext_hash, plaintext, server_timestamp, insert_timestamp)
+		VALUES (@p1, @p2, @p3, @p4, @p5)
+	`
+	sqliteClearBufferedEventPlaintextQuery = `
 		UPDATE whatsmeow_event_buffer SET plaintext = NULL WHERE our_jid = $1 AND ciphertext_hash = $2
+	`
+	mssqlClearBufferedEventPlaintextQuery = `
+		UPDATE whatsmeow_event_buffer SET plaintext = NULL WHERE our_jid = @p1 AND ciphertext_hash = @p2
 	`
 )
 
 func (s *SQLStore) GetBufferedEvent(ctx context.Context, ciphertextHash [32]byte) (*store.BufferedEvent, error) {
 	var insertTimeMS, serverTimeSeconds int64
 	var buf store.BufferedEvent
-	err := s.db.QueryRow(ctx, getBufferedEventQuery, s.JID, ciphertextHash[:]).Scan(&buf.Plaintext, &serverTimeSeconds, &insertTimeMS)
+	var err error
+	if s.db.Dialect == dbutil.MSSQL {
+		err = s.db.QueryRow(ctx, mssqlGetBufferedEventQuery, s.JID, ciphertextHash[:]).Scan(&buf.Plaintext, &serverTimeSeconds, &insertTimeMS)
+	} else {
+		err = s.db.QueryRow(ctx, sqliteGetBufferedEventQuery, s.JID, ciphertextHash[:]).Scan(&buf.Plaintext, &serverTimeSeconds, &insertTimeMS)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	} else if err != nil {
@@ -1737,7 +1752,11 @@ func (s *SQLStore) GetBufferedEvent(ctx context.Context, ciphertextHash [32]byte
 }
 
 func (s *SQLStore) PutBufferedEvent(ctx context.Context, ciphertextHash [32]byte, plaintext []byte, serverTimestamp time.Time) error {
-	_, err := s.db.Exec(ctx, putBufferedEventQuery, s.JID, ciphertextHash[:], plaintext, serverTimestamp.Unix(), time.Now().UnixMilli())
+	if s.db.Dialect == dbutil.MSSQL {
+		_, err := s.db.Exec(ctx, mssqlPutBufferedEventQuery, s.JID, ciphertextHash[:], plaintext, serverTimestamp.Unix(), time.Now().UnixMilli())
+		return err
+	}
+	_, err := s.db.Exec(ctx, sqlitePutBufferedEventQuery, s.JID, ciphertextHash[:], plaintext, serverTimestamp.Unix(), time.Now().UnixMilli())
 	return err
 }
 
@@ -1749,6 +1768,10 @@ func (s *SQLStore) DoDecryptionTxn(ctx context.Context, fn func(context.Context)
 }
 
 func (s *SQLStore) ClearBufferedEventPlaintext(ctx context.Context, ciphertextHash [32]byte) error {
-	_, err := s.db.Exec(ctx, clearBufferedEventPlaintextQuery, s.JID, ciphertextHash[:])
+	if s.db.Dialect == dbutil.MSSQL {
+		_, err := s.db.Exec(ctx, mssqlClearBufferedEventPlaintextQuery, s.JID, ciphertextHash[:])
+		return err
+	}
+	_, err := s.db.Exec(ctx, sqliteClearBufferedEventPlaintextQuery, s.JID, ciphertextHash[:])
 	return err
 }
