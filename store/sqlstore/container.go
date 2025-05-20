@@ -33,8 +33,6 @@ type Container struct {
 	log    waLog.Logger
 	mutex  sync.Mutex
 	LIDMap *CachedLIDMap
-
-	DatabaseErrorHandler func(device *store.Device, action string, attemptIndex int, err error) (retry bool)
 }
 
 var _ store.DeviceContainer = (*Container)(nil)
@@ -198,7 +196,6 @@ func (c *Container) GetNumberManager(jid types.JID) (string, error) {
 }
 func (c *Container) scanDevice(row dbutil.Scannable) (*store.Device, error) {
 	var device store.Device
-	device.DatabaseErrorHandler = c.DatabaseErrorHandler
 	device.Log = c.log
 	device.SignedPreKey = &keys.PreKey{}
 	var noisePriv, identityPriv, preKeyPriv, preKeySig []byte
@@ -380,7 +377,6 @@ func (c *Container) NewDevice(managerId string) *store.Device {
 		Log:       c.log,
 		Container: c,
 
-		DatabaseErrorHandler: c.DatabaseErrorHandler,
 		ManagerId:            managerId,
 		NoiseKey:             keys.NewKeyPair(),
 		IdentityKey:          keys.NewKeyPair(),

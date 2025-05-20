@@ -9,7 +9,6 @@ package store
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -226,15 +225,6 @@ type Device struct {
 	LockTime             int64
 	SessionsCache        map[string][]byte
 	IdentityCache        map[string][32]byte
-	DatabaseErrorHandler func(device *Device, action string, attemptIndex int, err error) (retry bool)
-}
-
-func (device *Device) handleDatabaseError(attemptIndex int, err error, action string, args ...interface{}) bool {
-	if device.DatabaseErrorHandler != nil {
-		return device.DatabaseErrorHandler(device, fmt.Sprintf(action, args...), attemptIndex, err)
-	}
-	device.Log.Errorf("Failed to %s: %v", fmt.Sprintf(action, args...), err)
-	return false
 }
 
 func (device *Device) GetJID() types.JID {
