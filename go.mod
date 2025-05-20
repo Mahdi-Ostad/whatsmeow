@@ -8,7 +8,6 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.0
 	github.com/rs/zerolog v1.34.0
-	github.com/rs/zerolog v1.34.0
 	go.mau.fi/libsignal v0.1.2
 	go.mau.fi/util v0.8.6
 	golang.org/x/crypto v0.38.0
