@@ -29,15 +29,17 @@ import (
 
 // Container is a wrapper for a SQL database that can contain multiple whatsmeow sessions.
 type Container struct {
-	db                   *RetryDB
-	log                  waLog.Logger
-	mutex                sync.Mutex
+	db     *RetryDB
+	log    waLog.Logger
+	mutex  sync.Mutex
 	LIDMap *CachedLIDMap
 
 	DatabaseErrorHandler func(device *store.Device, action string, attemptIndex int, err error) (retry bool)
 }
 
 var _ store.DeviceContainer = (*Container)(nil)
+
+var dbInstance *sql.DB
 
 // New connects to the given SQL database and wraps it in a Container.
 //
@@ -49,14 +51,17 @@ var _ store.DeviceContainer = (*Container)(nil)
 //
 //	container, err := sqlstore.New(context.Background(), "sqlite3", "file:yoursqlitefile.db?_foreign_keys=on", nil)
 func New(ctx context.Context, dialect, address string, log waLog.Logger, maxConnection int) (*Container, error) {
-	db, err := sql.Open(dialect, address)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open database: %w", err)
+	if dbInstance == nil {
+		db, err := sql.Open(dialect, address)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open database: %w", err)
+		}
+		db.SetMaxOpenConns(maxConnection)
+		db.SetMaxIdleConns(maxConnection)
+		dbInstance = db
 	}
-	db.SetMaxOpenConns(maxConnection)
-	db.SetMaxIdleConns(maxConnection)
-	container := NewWithDB(db, dialect, log)
-	err = container.Upgrade(ctx)
+	container := NewWithDB(dbInstance, dialect, log)
+	err := container.Upgrade(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to upgrade database: %w", err)
 	}
@@ -462,7 +467,7 @@ func (c *Container) DeleteDevice(ctx context.Context, store *store.Device) error
 	return err
 }
 
-func (c *Container) DeleteMessageNode(store *store.Device) error {
+func (c *Container) DeleteMessageNode(ctx context.Context, store *store.Device) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	if store.ID == nil {

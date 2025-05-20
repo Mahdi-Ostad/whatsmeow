@@ -38,7 +38,7 @@ func (device *Device) SaveIdentity(ctx context.Context, address *protocol.Signal
 	addrString := address.String()
 	if device.IdentityCache != nil && len(device.IdentityCache) > 0 {
 		device.IdentityCache[addrString] = identityKey.PublicKey().PublicKey()
-		return
+		return nil
 	}
 	err := device.Identities.PutIdentity(ctx, addrString, identityKey.PublicKey().PublicKey())
 	if err != nil {
@@ -51,7 +51,7 @@ func (device *Device) IsTrustedIdentity(ctx context.Context, address *protocol.S
 	addrString := address.String()
 	if device.IdentityCache != nil && len(device.IdentityCache) > 0 {
 		if cache, ok := device.IdentityCache[addrString]; ok {
-			return cache == identityKey.PublicKey().PublicKey()
+			return cache == identityKey.PublicKey().PublicKey(), nil
 		}
 		return true, nil
 	}
@@ -97,12 +97,12 @@ func (device *Device) LoadSession(ctx context.Context, address *protocol.SignalA
 	if device.SessionsCache != nil && len(device.SessionsCache) > 0 {
 		if rawSess, ok := device.SessionsCache[addrString]; ok {
 			sess, err := record.NewSessionFromBytes(rawSess, SignalProtobufSerializer.Session, SignalProtobufSerializer.State)
-	if err != nil {
-		return nil, fmt.Errorf("failed to deserialize session with %s: %w", addrString, err)
-	}
-	return sess, nil
+			if err != nil {
+				return nil, fmt.Errorf("failed to deserialize session with %s: %w", addrString, err)
+			}
+			return sess, nil
 		}
-		return record.NewSession(SignalProtobufSerializer.Session, SignalProtobufSerializer.State)
+		return record.NewSession(SignalProtobufSerializer.Session, SignalProtobufSerializer.State), nil
 	}
 	rawSess, err := device.Sessions.GetSession(ctx, addrString)
 	if err != nil {

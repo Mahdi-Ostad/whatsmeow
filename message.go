@@ -45,9 +45,9 @@ func (cli *Client) handleEncryptedMessage(node *waBinary.Node) {
 		cli.Log.Warnf("Failed to parse message: %v", err)
 	} else {
 		if info.Chat.Server == types.DefaultUserServer {
-			err = cli.Store.PrekeysCache.PutMessageNode(info.Chat.User, nil, node)
+			err = cli.Store.PrekeysCache.PutMessageNode(ctx, info.Chat.User, nil, node)
 		} else {
-			err = cli.Store.PrekeysCache.PutMessageNode(info.Sender.User, &info.Chat.User, node)
+			err = cli.Store.PrekeysCache.PutMessageNode(ctx, info.Sender.User, &info.Chat.User, node)
 		}
 		if err != nil {
 			cli.Log.Errorf("Failed to insert message node: %v", err)
@@ -67,7 +67,7 @@ func (cli *Client) handleEncryptedMessage(node *waBinary.Node) {
 	}
 }
 
-func (cli *Client) ManualHandleEncryptedMessage(node *waBinary.Node) {
+func (cli *Client) ManualHandleEncryptedMessage(ctx context.Context, node *waBinary.Node) {
 	info, err := cli.parseMessageInfo(node)
 	if err != nil {
 		cli.Log.Warnf("Failed to parse message: %v", err)

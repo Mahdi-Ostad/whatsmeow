@@ -170,14 +170,14 @@ type AllSessionSpecificStores interface {
 }
 
 type PrekeysCacheStore interface {
-	CacheSessions(addresses []string) map[string][]byte
-	CacheIdentities(addresses []string) map[string][32]byte
-	StoreSessions(sessions map[string][]byte, oldAddresses []string)
-	StoreIdentities(identityKeys map[string][32]byte, oldAddresses []string)
-	PutMessageNode(user string, group *string, node *waBinary.Node) error
-	GetMessageNodesByUser(user string) (map[int]waBinary.Node, error)
-	GetMessageNodesByGroup(group string) (map[int]waBinary.Node, error)
-	DeleteMessageNode(ref int) error
+	CacheSessions(ctx context.Context, addresses []string) map[string][]byte
+	CacheIdentities(ctx context.Context, addresses []string) map[string][32]byte
+	StoreSessions(ctx context.Context, sessions map[string][]byte, oldAddresses []string)
+	StoreIdentities(ctx context.Context, identityKeys map[string][32]byte, oldAddresses []string)
+	PutMessageNode(ctx context.Context, user string, group *string, node *waBinary.Node) error
+	GetMessageNodesByUser(ctx context.Context, user string) (map[int]waBinary.Node, error)
+	GetMessageNodesByGroup(ctx context.Context, group string) (map[int]waBinary.Node, error)
+	DeleteMessageNode(ctx context.Context, ref int) error
 }
 
 type AllGlobalStores interface {
@@ -219,8 +219,8 @@ type Device struct {
 	MsgSecrets           MsgSecretStore
 	PrivacyTokens        PrivacyTokenStore
 	PrekeysCache         PrekeysCacheStore
-	EventBuffer   EventBuffer
-	LIDs          LIDStore
+	EventBuffer          EventBuffer
+	LIDs                 LIDStore
 	Container            DeviceContainer
 	ManagerId            string
 	LockTime             int64
@@ -264,7 +264,7 @@ func (device *Device) Delete(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	err = device.Container.DeleteMessageNode(device)
+	err = device.Container.DeleteMessageNode(ctx, device)
 	if err != nil {
 		return err
 	}

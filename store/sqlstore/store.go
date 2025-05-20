@@ -119,7 +119,7 @@ func NewSQLStore(c *Container, jid types.JID) *SQLStore {
 	}
 }
 
-func ManageContacts(logger waLog.Logger) {
+func ManageContacts(ctx context.Context, logger waLog.Logger) {
 	defer func() {
 		if value := recover(); value != nil {
 			err, ok := value.(error)
@@ -131,7 +131,7 @@ func ManageContacts(logger waLog.Logger) {
 		}
 	}()
 	for contactUpdate := range contactsChannel {
-		err := bulkInsertContacts(contactUpdate)
+		err := bulkInsertContacts(ctx, contactUpdate)
 		if err != nil {
 			logger.Errorf("Could Not Insert Contacts: %s", err.Error())
 		}
@@ -145,42 +145,34 @@ func ManageContacts(logger waLog.Logger) {
 	}
 }
 
-func bulkInsertContacts(update contactUpdate) error {
-	tx, err := update.sqlStore.db.RawDB.Begin()
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	dt := time.Now()
-	_, err = tx.Exec(fmt.Sprintf(`CREATE TABLE staging_contacts_%d (
+func bulkInsertContacts(ctx context.Context, update contactUpdate) error {
+	return update.sqlStore.db.DoTxn(ctx, nil, func(ctx context.Context) error {
+		dt := time.Now()
+		_, err := update.sqlStore.db.Exec(ctx, fmt.Sprintf(`CREATE TABLE staging_contacts_%d (
 			our_jid       VARCHAR(300),
 			their_jid     VARCHAR(300),
 			first_name    VARCHAR(300),
 			full_name     VARCHAR(300)
-		)
-	`, dt.UnixMilli()))
-	if err != nil {
-		tx.Rollback()
-		return fmt.Errorf("failed to create table: %w", err)
-	}
-	bulkImportStr := mssql.CopyIn(fmt.Sprintf("staging_contacts_%d", dt.UnixMilli()), mssql.BulkOptions{}, "our_jid", "their_jid", "first_name", "full_name")
-	stmt, err := tx.Prepare(bulkImportStr)
-	if err != nil {
-		tx.Rollback()
-		return fmt.Errorf("failed to prepare bulk: %w", err)
-	}
-	for _, insert := range update.contacts {
-		_, err = stmt.Exec(update.sqlStore.JID, insert.JID.String(), insert.FirstName, insert.FullName)
+		)`, dt.UnixMilli()))
 		if err != nil {
-			tx.Rollback()
-			return fmt.Errorf("failed to prepare insert: %w", err)
+			return fmt.Errorf("failed to create table: %w", err)
 		}
-	}
-	_, err = stmt.Exec()
-	if err != nil {
-		tx.Rollback()
-		return fmt.Errorf("failed to execute bulk: %w", err)
-	}
-	_, err = tx.Exec(fmt.Sprintf(`MERGE INTO whatsmeow_contacts AS target 
+		bulkImportStr := mssql.CopyIn(fmt.Sprintf("staging_contacts_%d", dt.UnixMilli()), mssql.BulkOptions{}, "our_jid", "their_jid", "first_name", "full_name")
+		stmt, err := update.sqlStore.db.PrepareContext(ctx, bulkImportStr)
+		if err != nil {
+			return fmt.Errorf("failed to prepare bulk: %w", err)
+		}
+		for _, insert := range update.contacts {
+			_, err = stmt.Exec(update.sqlStore.JID, insert.JID.String(), insert.FirstName, insert.FullName)
+			if err != nil {
+				return fmt.Errorf("failed to prepare insert: %w", err)
+			}
+		}
+		_, err = stmt.Exec()
+		if err != nil {
+			return fmt.Errorf("failed to execute bulk: %w", err)
+		}
+		_, err = update.sqlStore.db.Exec(ctx, fmt.Sprintf(`MERGE INTO whatsmeow_contacts AS target 
 		USING staging_contacts_%d AS source 
 		ON target.our_jid = source.our_jid AND target.their_jid = source.their_jid 
 		WHEN MATCHED THEN
@@ -188,49 +180,44 @@ func bulkInsertContacts(update contactUpdate) error {
 		WHEN NOT MATCHED THEN
 			INSERT (our_jid, their_jid, first_name, full_name)
 			VALUES (source.our_jid, source.their_jid, source.first_name, source.full_name);`, dt.UnixMilli()))
-	if err != nil {
-		tx.Rollback()
-		return fmt.Errorf("failed to merge bulk: %w", err)
-	}
-	_, err = tx.Exec(fmt.Sprintf("DROP TABLE staging_contacts_%d", dt.UnixMilli()))
-	if err != nil {
-		tx.Rollback()
-		return fmt.Errorf("failed to merge bulk: %w", err)
-	}
-	err = tx.Commit()
-	if err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
-	}
-	return err
+		if err != nil {
+			return fmt.Errorf("failed to merge bulk: %w", err)
+		}
+		_, err = update.sqlStore.db.Exec(ctx, fmt.Sprintf("DROP TABLE staging_contacts_%d", dt.UnixMilli()))
+		if err != nil {
+			return fmt.Errorf("failed to merge bulk: %w", err)
+		}
+		return nil
+	})
 }
 
-func ManageSenderKeys() {
+func ManageSenderKeys(ctx context.Context) {
 	for update := range senderkeysChannel {
-		err := manageSingleSenderKey(update)
+		err := manageSingleSenderKey(ctx, update)
 		if err != nil {
 			update.sqlStore.log.Errorf(err.Error())
 		}
 	}
 }
 
-func manageSingleSenderKey(senderkeyUpdate senderkeyUpdate) error {
+func manageSingleSenderKey(ctx context.Context, senderkeyUpdate senderkeyUpdate) error {
 	senderkeyUpdate.sqlStore.mutex.Lock()
 	defer senderkeyUpdate.sqlStore.mutex.Unlock()
 	if senderkeyUpdate.sqlStore.db.Dialect == dbutil.MSSQL {
-		_, err := senderkeyUpdate.sqlStore.db.Exec(context.TODO(), mssqlPutSenderKeyQuery, senderkeyUpdate.sqlStore.JID, senderkeyUpdate.group, senderkeyUpdate.user, senderkeyUpdate.session)
+		_, err := senderkeyUpdate.sqlStore.db.Exec(ctx, mssqlPutSenderKeyQuery, senderkeyUpdate.sqlStore.JID, senderkeyUpdate.group, senderkeyUpdate.user, senderkeyUpdate.session)
 		return err
 	}
-	_, err := senderkeyUpdate.sqlStore.db.Exec(context.TODO(), sqlitePutSenderKeyQuery, senderkeyUpdate.sqlStore.JID, senderkeyUpdate.group, senderkeyUpdate.user, senderkeyUpdate.session)
+	_, err := senderkeyUpdate.sqlStore.db.Exec(ctx, sqlitePutSenderKeyQuery, senderkeyUpdate.sqlStore.JID, senderkeyUpdate.group, senderkeyUpdate.user, senderkeyUpdate.session)
 	return err
 }
 
-func ManageSessions(logger waLog.Logger) {
+func ManageSessions(ctx context.Context, logger waLog.Logger) {
 	for update := range sessionChannel {
 		var err error
 		if update.isAdd {
-			err = putSingleSession(update)
+			err = putSingleSession(ctx, update)
 		} else {
-			err = deleteSingleSession(update)
+			err = deleteSingleSession(ctx, update)
 		}
 		if err != nil {
 			logger.Errorf("Could Not Update Session %s: %s", update.address, err.Error())
@@ -238,31 +225,31 @@ func ManageSessions(logger waLog.Logger) {
 	}
 }
 
-func putSingleSession(update sessionUpdate) (err error) {
+func putSingleSession(ctx context.Context, update sessionUpdate) (err error) {
 	update.sqlStore.mutex.Lock()
 	defer update.sqlStore.mutex.Unlock()
 	if update.sqlStore.db.Dialect == dbutil.MSSQL {
-		_, err = update.sqlStore.db.Exec(context.TODO(), mssqlPutSessionQuery, update.sqlStore.JID, update.address, update.session)
+		_, err = update.sqlStore.db.Exec(ctx, mssqlPutSessionQuery, update.sqlStore.JID, update.address, update.session)
 	} else {
-		_, err = update.sqlStore.db.Exec(context.TODO(), sqlitePutSessionQuery, update.sqlStore.JID, update.address, update.session)
+		_, err = update.sqlStore.db.Exec(ctx, sqlitePutSessionQuery, update.sqlStore.JID, update.address, update.session)
 	}
 	return err
 }
 
-func deleteSingleSession(update sessionUpdate) (err error) {
+func deleteSingleSession(ctx context.Context, update sessionUpdate) (err error) {
 	update.sqlStore.mutex.Lock()
 	defer update.sqlStore.mutex.Unlock()
-	_, err = update.sqlStore.db.Exec(context.TODO(), deleteSessionQuery, update.sqlStore.JID, update.address)
+	_, err = update.sqlStore.db.Exec(ctx, deleteSessionQuery, update.sqlStore.JID, update.address)
 	return err
 }
 
-func ManageIdentities(logger waLog.Logger) {
+func ManageIdentities(ctx context.Context, logger waLog.Logger) {
 	for update := range identityChannel {
 		var err error
 		if update.isAdd {
-			err = putSingleIdentity(update)
+			err = putSingleIdentity(ctx, update)
 		} else {
-			err = deleteSingleIdentity(update)
+			err = deleteSingleIdentity(ctx, update)
 		}
 		if err != nil {
 			logger.Errorf("Could Not Update Identity %s: %s", update.address, err.Error())
@@ -270,57 +257,57 @@ func ManageIdentities(logger waLog.Logger) {
 	}
 }
 
-func putSingleIdentity(update identityUpdate) (err error) {
+func putSingleIdentity(ctx context.Context, update identityUpdate) (err error) {
 	update.sqlStore.mutex.Lock()
 	defer update.sqlStore.mutex.Unlock()
 	if update.sqlStore.db.Dialect == dbutil.MSSQL {
-		_, err := update.sqlStore.db.Exec(context.TODO(), mssqlPutIdentityQuery, update.sqlStore.JID, update.address, update.key[:])
+		_, err := update.sqlStore.db.Exec(ctx, mssqlPutIdentityQuery, update.sqlStore.JID, update.address, update.key[:])
 		return err
 	}
-	_, err = update.sqlStore.db.Exec(context.TODO(), sqlitePutIdentityQuery, update.sqlStore.JID, update.address, update.key[:])
+	_, err = update.sqlStore.db.Exec(ctx, sqlitePutIdentityQuery, update.sqlStore.JID, update.address, update.key[:])
 	return err
 }
 
-func deleteSingleIdentity(update identityUpdate) (err error) {
+func deleteSingleIdentity(ctx context.Context, update identityUpdate) (err error) {
 	update.sqlStore.mutex.Lock()
 	defer update.sqlStore.mutex.Unlock()
-	_, err = update.sqlStore.db.Exec(context.TODO(), deleteAllIdentitiesQuery, update.sqlStore.JID, update.address)
+	_, err = update.sqlStore.db.Exec(ctx, deleteAllIdentitiesQuery, update.sqlStore.JID, update.address)
 	return err
 }
 
-func ManageRemovingPreKeys(logger waLog.Logger) {
+func ManageRemovingPreKeys(ctx context.Context, logger waLog.Logger) {
 	for update := range removePreKeyChannel {
-		err := singleRemovePreKey(update)
+		err := singleRemovePreKey(ctx, update)
 		if err != nil {
 			logger.Errorf("Could Not Remove PreKey %d: %s", update.id, err.Error())
 		}
 	}
 }
 
-func singleRemovePreKey(update removePreKeyUpdate) (err error) {
+func singleRemovePreKey(ctx context.Context, update removePreKeyUpdate) (err error) {
 	update.sqlStore.mutex.Lock()
 	defer update.sqlStore.mutex.Unlock()
-	_, err = update.sqlStore.db.Exec(context.TODO(), deletePreKeyQuery, update.sqlStore.JID, update.id)
+	_, err = update.sqlStore.db.Exec(ctx, deletePreKeyQuery, update.sqlStore.JID, update.id)
 	return err
 }
 
-func ManagePutMessageSecret(logger waLog.Logger) {
+func ManagePutMessageSecret(ctx context.Context, logger waLog.Logger) {
 	for update := range putMessageSecretChannel {
-		err := singlePutMessageSecret(update)
+		err := singlePutMessageSecret(ctx, update)
 		if err != nil {
 			logger.Errorf("Could Not Put Message Secret %s: %s", update.id, err.Error())
 		}
 	}
 }
 
-func singlePutMessageSecret(update putMessageSecretUpdate) (err error) {
+func singlePutMessageSecret(ctx context.Context, update putMessageSecretUpdate) (err error) {
 	update.sqlStore.mutex.Lock()
 	defer update.sqlStore.mutex.Unlock()
 	if update.sqlStore.db.Dialect == dbutil.MSSQL {
-		_, err = update.sqlStore.db.Exec(context.TODO(), mssqlPutMsgSecret, update.sqlStore.JID, update.chat.ToNonAD(), update.sender.ToNonAD(), update.id, update.secret)
+		_, err = update.sqlStore.db.Exec(ctx, mssqlPutMsgSecret, update.sqlStore.JID, update.chat.ToNonAD(), update.sender.ToNonAD(), update.id, update.secret)
 		return
 	}
-	_, err = update.sqlStore.db.Exec(context.TODO(), sqlitePutMsgSecret, update.sqlStore.JID, update.chat.ToNonAD(), update.sender.ToNonAD(), update.id, update.secret)
+	_, err = update.sqlStore.db.Exec(ctx, sqlitePutMsgSecret, update.sqlStore.JID, update.chat.ToNonAD(), update.sender.ToNonAD(), update.id, update.secret)
 	return
 }
 
@@ -583,6 +570,17 @@ func (s *SQLStore) MigratePNToLID(ctx context.Context, pn, lid types.JID) error 
 		} else {
 			res, err = s.db.Exec(ctx, sqliteMigratePNToLIDSenderKeysQuery, s.JID, pnSignal, lidSignal)
 		}
+		if err != nil {
+			return fmt.Errorf("failed to migrate sender keys: %w", err)
+		}
+		senderKeysUpdated, err = res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("failed to get rows affected for sender keys: %w", err)
+		}
+		err = s.deleteAllSenderKeys(ctx, pnSignal)
+		if err != nil {
+			return fmt.Errorf("failed to delete extra sender keys: %w", err)
+		}
 		if s.db.Dialect == dbutil.MSSQL {
 			res, err = s.db.Exec(ctx, mssqlMigratePNToLIDIdentityKeysQuery, s.JID, pnSignal, lidSignal)
 			if err != nil {
@@ -604,14 +602,6 @@ func (s *SQLStore) MigratePNToLID(ctx context.Context, pn, lid types.JID) error 
 			return fmt.Errorf("failed to delete extra identity keys: %w", err)
 		}
 
-		senderKeysUpdated, err = res.RowsAffected()
-		if err != nil {
-			return fmt.Errorf("failed to get rows affected for sender keys: %w", err)
-		}
-		err = s.deleteAllSenderKeys(ctx, pnSignal)
-		if err != nil {
-			return fmt.Errorf("failed to delete extra sender keys: %w", err)
-		}
 		return nil
 	})
 	if err != nil {
@@ -966,7 +956,7 @@ func (s *SQLStore) PutAppStateMutationMACs(ctx context.Context, name string, ver
 		return nil
 	}
 	bulkimportStr := mssql.CopyIn("whatsmeow_app_state_mutation_macs", mssql.BulkOptions{}, "jid", "name", "version_info", "index_mac", "value_mac")
-	stmt, err := s.db.RawDB.PrepareContext(ctx, bulkimportStr)
+	stmt, err := s.db.PrepareContext(ctx, bulkimportStr)
 	if err != nil {
 		return fmt.Errorf("failed to prepare bulk: %w", err)
 	}
@@ -1361,7 +1351,7 @@ func (s *SQLStore) PutMessageSecrets(ctx context.Context, inserts []store.Messag
 	}
 	return s.db.DoTxn(ctx, nil, func(ctx context.Context) error {
 		dt := time.Now()
-	_, err = s.db.Exec(context.TODO(), fmt.Sprintf(`CREATE TABLE staging_messagesecrets_%d (
+		_, err = s.db.Exec(ctx, fmt.Sprintf(`CREATE TABLE staging_messagesecrets_%d (
 			our_jid    VARCHAR(300),
 			chat_jid   VARCHAR(200),
 			sender_jid  VARCHAR(200),
@@ -1369,35 +1359,35 @@ func (s *SQLStore) PutMessageSecrets(ctx context.Context, inserts []store.Messag
 			key_info  VARBINARY(max) NOT NULL
 		)
 	`, dt.UnixMilli()))
-	if err != nil {
-		return fmt.Errorf("failed to create table: %w", err)
-	}
-	bulkImportStr := mssql.CopyIn(fmt.Sprintf("staging_messagesecrets_%d", dt.UnixMilli()), mssql.BulkOptions{}, "our_jid", "chat_jid", "sender_jid", "message_id", "key_info")
-	stmt, err := s.db.RawDB.PrepareContext(context.TODO(), bulkImportStr)
-	if err != nil {
-		return fmt.Errorf("failed to prepare bulk: %w", err)
-	}
-	for _, insert := range inserts {
-		_, err = stmt.Exec(s.JID, insert.Chat.ToNonAD(), insert.Sender.ToNonAD(), insert.ID, insert.Secret)
 		if err != nil {
-			return fmt.Errorf("failed to prepare insert: %w", err)
+			return fmt.Errorf("failed to create table: %w", err)
 		}
-	}
-	_, err = stmt.Exec()
-	if err != nil {
-		return fmt.Errorf("failed to execute bulk: %w", err)
-	}
-	_, err = s.db.Exec(context.TODO(), fmt.Sprintf("MERGE INTO whatsmeow_message_secrets AS target USING staging_messagesecrets_%d AS source ON target.our_jid = source.our_jid AND target.chat_jid = source.chat_jid AND target.sender_jid = source.sender_jid AND target.message_id = source.message_id WHEN NOT MATCHED THEN INSERT (our_jid, chat_jid, sender_jid, message_id, key_info) VALUES (source.our_jid, source.chat_jid, source.sender_jid, source.message_id, source.key_info);", dt.UnixMilli()))
-	if err != nil {
-		return fmt.Errorf("failed to merge bulk: %w", err)
-	}
-	_, err = s.db.Exec(context.TODO(), fmt.Sprintf("DROP TABLE staging_messagesecrets_%d", dt.UnixMilli()))
-	if err != nil {
-		return fmt.Errorf("failed to merge bulk: %w", err)
-	}
-	if err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
-	}
+		bulkImportStr := mssql.CopyIn(fmt.Sprintf("staging_messagesecrets_%d", dt.UnixMilli()), mssql.BulkOptions{}, "our_jid", "chat_jid", "sender_jid", "message_id", "key_info")
+		stmt, err := s.db.PrepareContext(ctx, bulkImportStr)
+		if err != nil {
+			return fmt.Errorf("failed to prepare bulk: %w", err)
+		}
+		for _, insert := range inserts {
+			_, err = stmt.Exec(s.JID, insert.Chat.ToNonAD(), insert.Sender.ToNonAD(), insert.ID, insert.Secret)
+			if err != nil {
+				return fmt.Errorf("failed to prepare insert: %w", err)
+			}
+		}
+		_, err = stmt.Exec()
+		if err != nil {
+			return fmt.Errorf("failed to execute bulk: %w", err)
+		}
+		_, err = s.db.Exec(ctx, fmt.Sprintf("MERGE INTO whatsmeow_message_secrets AS target USING staging_messagesecrets_%d AS source ON target.our_jid = source.our_jid AND target.chat_jid = source.chat_jid AND target.sender_jid = source.sender_jid AND target.message_id = source.message_id WHEN NOT MATCHED THEN INSERT (our_jid, chat_jid, sender_jid, message_id, key_info) VALUES (source.our_jid, source.chat_jid, source.sender_jid, source.message_id, source.key_info);", dt.UnixMilli()))
+		if err != nil {
+			return fmt.Errorf("failed to merge bulk: %w", err)
+		}
+		_, err = s.db.Exec(ctx, fmt.Sprintf("DROP TABLE staging_messagesecrets_%d", dt.UnixMilli()))
+		if err != nil {
+			return fmt.Errorf("failed to merge bulk: %w", err)
+		}
+		if err != nil {
+			return fmt.Errorf("failed to commit transaction: %w", err)
+		}
 		return nil
 	})
 }
@@ -1448,33 +1438,33 @@ const (
 )
 
 func (s *SQLStore) PutPrivacyTokens(ctx context.Context, tokens ...store.PrivacyToken) error {
-	dt := time.Now()
-	_, err := s.db.Exec(ctx, fmt.Sprintf(`CREATE TABLE staging_privacytokens_%d (
+	return s.db.DoTxn(ctx, nil, func(ctx context.Context) error {
+		dt := time.Now()
+		_, err := s.db.Exec(ctx, fmt.Sprintf(`CREATE TABLE staging_privacytokens_%d (
 			our_jid   VARCHAR(300),
 			their_jid VARCHAR(300),
 			token     VARBINARY(max)  NOT NULL,
 			timestamp_info BIGINT NOT NULL,
-		)
-	`, dt.UnixMilli()))
-	if err != nil {
-		return fmt.Errorf("failed to create table: %w", err)
-	}
-	bulkImportStr := mssql.CopyIn(fmt.Sprintf("staging_privacytokens_%d", dt.UnixMilli()), mssql.BulkOptions{}, "our_jid", "their_jid", "token", "timestamp_info")
-	stmt, err := s.db.RawDB.PrepareContext(ctx, bulkImportStr)
-	if err != nil {
-		return fmt.Errorf("failed to prepare bulk: %w", err)
-	}
-	for _, token := range tokens {
-		_, err = stmt.Exec(s.JID, token.User.ToNonAD().String(), token.Token, token.Timestamp.Unix())
+		)`, dt.UnixMilli()))
 		if err != nil {
-			return fmt.Errorf("failed to prepare insert: %w", err)
+			return fmt.Errorf("failed to create table: %w", err)
 		}
-	}
-	_, err = stmt.Exec()
-	if err != nil {
-		return fmt.Errorf("failed to execute bulk: %w", err)
-	}
-	_, err = s.db.Exec(ctx, fmt.Sprintf(`MERGE INTO whatsmeow_privacy_tokens AS target 
+		bulkImportStr := mssql.CopyIn(fmt.Sprintf("staging_privacytokens_%d", dt.UnixMilli()), mssql.BulkOptions{}, "our_jid", "their_jid", "token", "timestamp_info")
+		stmt, err := s.db.PrepareContext(ctx, bulkImportStr)
+		if err != nil {
+			return fmt.Errorf("failed to prepare bulk: %w", err)
+		}
+		for _, token := range tokens {
+			_, err = stmt.Exec(s.JID, token.User.ToNonAD().String(), token.Token, token.Timestamp.Unix())
+			if err != nil {
+				return fmt.Errorf("failed to prepare insert: %w", err)
+			}
+		}
+		_, err = stmt.Exec()
+		if err != nil {
+			return fmt.Errorf("failed to execute bulk: %w", err)
+		}
+		_, err = s.db.Exec(ctx, fmt.Sprintf(`MERGE INTO whatsmeow_privacy_tokens AS target 
 		USING staging_privacytokens_%d AS source 
 		ON target.our_jid = source.our_jid AND target.their_jid = source.their_jid
 		WHEN MATCHED THEN
@@ -1482,17 +1472,18 @@ func (s *SQLStore) PutPrivacyTokens(ctx context.Context, tokens ...store.Privacy
 		WHEN NOT MATCHED THEN
 			INSERT (our_jid, their_jid, token, timestamp_info)
 			VALUES (source.our_jid, source.their_jid, source.token, source.timestamp_info);`, dt.UnixMilli()))
-	if err != nil {
-		return fmt.Errorf("failed to merge bulk: %w", err)
-	}
-	_, err = s.db.Exec(ctx, fmt.Sprintf("DROP TABLE staging_privacytokens_%d", dt.UnixMilli()))
-	if err != nil {
-		return fmt.Errorf("failed to merge bulk: %w", err)
-	}
-	if err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
-	}
-	return err
+		if err != nil {
+			return fmt.Errorf("failed to merge bulk: %w", err)
+		}
+		_, err = s.db.Exec(ctx, fmt.Sprintf("DROP TABLE staging_privacytokens_%d", dt.UnixMilli()))
+		if err != nil {
+			return fmt.Errorf("failed to merge bulk: %w", err)
+		}
+		if err != nil {
+			return fmt.Errorf("failed to commit transaction: %w", err)
+		}
+		return nil
+	})
 }
 
 func (s *SQLStore) GetPrivacyToken(ctx context.Context, user types.JID) (*store.PrivacyToken, error) {
@@ -1527,7 +1518,7 @@ const (
 	removeMessageNodeQuery   = `DELETE FROM whatsapp_message_node WHERE id=@p1`
 )
 
-func (s *SQLStore) CacheSessions(addresses []string) (final map[string][]byte) {
+func (s *SQLStore) CacheSessions(ctx context.Context, addresses []string) (final map[string][]byte) {
 	final = make(map[string][]byte)
 	if len(addresses) == 0 {
 		return final
@@ -1543,7 +1534,7 @@ func (s *SQLStore) CacheSessions(addresses []string) (final map[string][]byte) {
 		queryParams[index+1] = address
 	}
 	query += ")"
-	rows, err := s.db.Query(context.TODO(), query, queryParams...)
+	rows, err := s.db.Query(ctx, query, queryParams...)
 	if err != nil {
 		s.log.Errorf(err.Error())
 		return
@@ -1557,7 +1548,7 @@ func (s *SQLStore) CacheSessions(addresses []string) (final map[string][]byte) {
 	return
 }
 
-func (s *SQLStore) CacheIdentities(addresses []string) (final map[string][32]byte) {
+func (s *SQLStore) CacheIdentities(ctx context.Context, addresses []string) (final map[string][32]byte) {
 	final = make(map[string][32]byte)
 	if len(addresses) == 0 {
 		return final
@@ -1573,7 +1564,7 @@ func (s *SQLStore) CacheIdentities(addresses []string) (final map[string][32]byt
 		queryParams[index+1] = address
 	}
 	query += ")"
-	rows, err := s.db.Query(context.TODO(), query, queryParams...)
+	rows, err := s.db.Query(ctx, query, queryParams...)
 	if err != nil {
 		s.log.Errorf(err.Error())
 		return
@@ -1587,7 +1578,7 @@ func (s *SQLStore) CacheIdentities(addresses []string) (final map[string][32]byt
 	return
 }
 
-func (s *SQLStore) StoreSessions(sessions map[string][]byte, oldAddresses []string) {
+func (s *SQLStore) StoreSessions(ctx context.Context, sessions map[string][]byte, oldAddresses []string) {
 	if len(oldAddresses) > 0 {
 		query := removeSessionsQuery + "("
 		queryParams := make([]interface{}, len(oldAddresses)+1)
@@ -1600,14 +1591,18 @@ func (s *SQLStore) StoreSessions(sessions map[string][]byte, oldAddresses []stri
 			queryParams[index+1] = address
 		}
 		query += ")"
-		_, err := s.db.Exec(context.TODO(), query, queryParams...)
+		_, err := s.db.Exec(ctx, query, queryParams...)
 		if err != nil {
 			s.log.Errorf("Could not Remove Sessions: " + err.Error())
 			return
 		}
 	}
 	bulkImportStr := mssql.CopyIn("whatsmeow_sessions", mssql.BulkOptions{}, "our_jid", "their_id", "session")
-	stmt, err := s.db.RawDB.PrepareContext(context.TODO(), bulkImportStr)
+	stmt, err := s.db.PrepareContext(ctx, bulkImportStr)
+	if err != nil {
+		s.log.Errorf("Could not Prepare Statement: " + err.Error())
+		return
+	}
 	for address, session := range sessions {
 		stmt.Exec(s.JID, address, session[:])
 	}
@@ -1617,7 +1612,7 @@ func (s *SQLStore) StoreSessions(sessions map[string][]byte, oldAddresses []stri
 	}
 }
 
-func (s *SQLStore) StoreIdentities(identityKeys map[string][32]byte, oldAddresses []string) {
+func (s *SQLStore) StoreIdentities(ctx context.Context, identityKeys map[string][32]byte, oldAddresses []string) {
 	if len(oldAddresses) > 0 {
 		query := removeIdentityKeysQuery + "("
 		queryParams := make([]interface{}, len(oldAddresses)+1)
@@ -1630,14 +1625,18 @@ func (s *SQLStore) StoreIdentities(identityKeys map[string][32]byte, oldAddresse
 			queryParams[index+1] = address
 		}
 		query += ")"
-		_, err := s.db.Exec(context.TODO(), query, queryParams...)
+		_, err := s.db.Exec(ctx, query, queryParams...)
 		if err != nil {
 			s.log.Errorf("Could not Remove Identity Keys: " + err.Error())
 			return
 		}
 	}
 	bulkImportStr := mssql.CopyIn("whatsmeow_identity_keys", mssql.BulkOptions{}, "our_jid", "their_id", "identity_info")
-	stmt, err := s.db.RawDB.PrepareContext(context.TODO(), bulkImportStr)
+	stmt, err := s.db.PrepareContext(ctx, bulkImportStr)
+	if err != nil {
+		s.log.Errorf("Could not Prepare Statement: " + err.Error())
+		return
+	}
 	for address, identityInfo := range identityKeys {
 		stmt.Exec(s.JID, address, identityInfo[:])
 	}
@@ -1647,24 +1646,24 @@ func (s *SQLStore) StoreIdentities(identityKeys map[string][32]byte, oldAddresse
 	}
 }
 
-func (s *SQLStore) PutMessageNode(user string, group *string, node *waBinary.Node) (err error) {
+func (s *SQLStore) PutMessageNode(ctx context.Context, user string, group *string, node *waBinary.Node) (err error) {
 	nodeData, err := json.Marshal(node)
 	if err != nil {
 		return fmt.Errorf("failed to marshal node: %w", err)
 	}
 	if group != nil {
 		if s.db.Dialect == dbutil.MSSQL {
-			_, err = s.db.Exec(context.TODO(), mssqlPutNodeWithGroup, s.JID, user, *group, nodeData)
+			_, err = s.db.Exec(ctx, mssqlPutNodeWithGroup, s.JID, user, *group, nodeData)
 		}
 	} else {
 		if s.db.Dialect == dbutil.MSSQL {
-			_, err = s.db.Exec(context.TODO(), mssqlPutNodeWithoutGroup, s.JID, user, nodeData)
+			_, err = s.db.Exec(ctx, mssqlPutNodeWithoutGroup, s.JID, user, nodeData)
 		}
 	}
 	return err
 }
-func (s *SQLStore) GetMessageNodesByUser(user string) (map[int]waBinary.Node, error) {
-	rows, err := s.db.Query(context.TODO(), getNodesByPerson, s.JID, user)
+func (s *SQLStore) GetMessageNodesByUser(ctx context.Context, user string) (map[int]waBinary.Node, error) {
+	rows, err := s.db.Query(ctx, getNodesByPerson, s.JID, user)
 	if err != nil {
 		return nil, err
 	}
@@ -1683,8 +1682,8 @@ func (s *SQLStore) GetMessageNodesByUser(user string) (map[int]waBinary.Node, er
 	}
 	return output, nil
 }
-func (s *SQLStore) GetMessageNodesByGroup(group string) (map[int]waBinary.Node, error) {
-	rows, err := s.db.Query(context.TODO(), getNodesByGroup, s.JID, group)
+func (s *SQLStore) GetMessageNodesByGroup(ctx context.Context, group string) (map[int]waBinary.Node, error) {
+	rows, err := s.db.Query(ctx, getNodesByGroup, s.JID, group)
 	if err != nil {
 		return nil, err
 	}
@@ -1704,8 +1703,8 @@ func (s *SQLStore) GetMessageNodesByGroup(group string) (map[int]waBinary.Node, 
 	return output, nil
 }
 
-func (s *SQLStore) DeleteMessageNode(ref int) (err error) {
-	_, err = s.db.Exec(context.TODO(), removeMessageNodeQuery, ref)
+func (s *SQLStore) DeleteMessageNode(ctx context.Context, ref int) (err error) {
+	_, err = s.db.Exec(ctx, removeMessageNodeQuery, ref)
 	return err
 }
 

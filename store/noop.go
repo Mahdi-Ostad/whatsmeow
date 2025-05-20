@@ -251,6 +251,6 @@ func (n *NoopStore) PutLIDMapping(ctx context.Context, lid types.JID, jid types.
 	return n.Error
 }
 
-func (n *NoopStore) DeleteMessageNode(store *Device) error {
+func (n *NoopStore) DeleteMessageNode(ctx context.Context, store *Device) error {
 	return n.Error
 }

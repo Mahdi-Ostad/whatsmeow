@@ -1166,8 +1166,8 @@ func (cli *Client) encryptMessageForDevices(
 	for _, jid := range allDevices {
 		addresses = append(addresses, jid.SignalAddress().String())
 	}
-	cli.Store.SessionsCache = cli.Store.PrekeysCache.CacheSessions(addresses)
-	cli.Store.IdentityCache = cli.Store.PrekeysCache.CacheIdentities(addresses)
+	cli.Store.SessionsCache = cli.Store.PrekeysCache.CacheSessions(ctx, addresses)
+	cli.Store.IdentityCache = cli.Store.PrekeysCache.CacheIdentities(ctx, addresses)
 	for _, jid := range allDevices {
 		plaintext := msgPlaintext
 		if (jid.User == ownJID.User || jid.User == ownLID.User) && dsmPlaintext != nil {
@@ -1248,10 +1248,10 @@ func (cli *Client) encryptMessageForDevices(
 		delete(cli.Store.IdentityCache, "dummy")
 	}
 	if len(cli.Store.IdentityCache) > 0 {
-		cli.Store.PrekeysCache.StoreIdentities(cli.Store.IdentityCache, oldIdentityKeys)
+		cli.Store.PrekeysCache.StoreIdentities(ctx, cli.Store.IdentityCache, oldIdentityKeys)
 	}
 	if len(cli.Store.SessionsCache) > 0 {
-		cli.Store.PrekeysCache.StoreSessions(cli.Store.SessionsCache, oldSessions)
+		cli.Store.PrekeysCache.StoreSessions(ctx, cli.Store.SessionsCache, oldSessions)
 	}
 	clear(cli.Store.SessionsCache)
 	clear(cli.Store.IdentityCache)
