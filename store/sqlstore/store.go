@@ -416,7 +416,7 @@ const (
 	mssqlMigratePNToLIDSessionsQuery = `
 		MERGE INTO whatsmeow_sessions AS target
 		USING (
-    		SELECT @p1 AS our_jid, REPLACE(their_id, @p2, @p3) AS their_id, session
+    		SELECT our_jid, REPLACE(their_id, @p2, @p3) AS their_id, session
     		FROM whatsmeow_sessions
     		WHERE our_jid = @p1 AND their_id LIKE @p2 + ':%'
 		) AS source
@@ -440,7 +440,7 @@ const (
 	mssqlMigratePNToLIDIdentityKeysQuery = `
 		MERGE INTO whatsmeow_identity_keys AS target
 		USING (
-    		SELECT @p1 AS our_jid, REPLACE(their_id, @p2, @p3) AS their_id, identity
+    		SELECT our_jid, REPLACE(their_id, @p2, @p3) AS their_id, identity
     		FROM whatsmeow_identity_keys
     		WHERE our_jid = @p1 AND their_id LIKE @p2 + ':%'
 		) AS source
@@ -460,7 +460,7 @@ const (
 	mssqlMigratePNToLIDSenderKeysQuery = `
 		MERGE INTO whatsmeow_sender_keys AS target
 		USING (
-    		SELECT @p1 AS our_jid, chat_id, REPLACE(sender_id, @p2, @p3) AS sender_id, sender_key
+    		SELECT our_jid, chat_id, REPLACE(sender_id, @p2, @p3) AS sender_id, sender_key
     		FROM whatsmeow_sender_keys
     		WHERE our_jid = @p1 AND sender_id LIKE @p2 + ':%'
 		) AS source
