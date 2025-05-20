@@ -53,6 +53,8 @@ type SQLStore struct {
 	contactCacheLock sync.Mutex
 
 	migratedPNSessionsCache *exsync.Set[string]
+
+	DisableDecryptedEventBuffer bool
 }
 
 type contactUpdate struct {
@@ -1732,6 +1734,9 @@ const (
 )
 
 func (s *SQLStore) GetBufferedEvent(ctx context.Context, ciphertextHash [32]byte) (*store.BufferedEvent, error) {
+	if s.DisableDecryptedEventBuffer {
+		return nil, nil
+	}
 	var insertTimeMS, serverTimeSeconds int64
 	var buf store.BufferedEvent
 	var err error
@@ -1751,6 +1756,9 @@ func (s *SQLStore) GetBufferedEvent(ctx context.Context, ciphertextHash [32]byte
 }
 
 func (s *SQLStore) PutBufferedEvent(ctx context.Context, ciphertextHash [32]byte, plaintext []byte, serverTimestamp time.Time) error {
+	if s.DisableDecryptedEventBuffer {
+		return nil
+	}
 	if s.db.Dialect == dbutil.MSSQL {
 		_, err := s.db.Exec(ctx, mssqlPutBufferedEventQuery, s.JID, ciphertextHash[:], plaintext, serverTimestamp.Unix(), time.Now().UnixMilli())
 		return err
@@ -1760,11 +1768,17 @@ func (s *SQLStore) PutBufferedEvent(ctx context.Context, ciphertextHash [32]byte
 }
 
 func (s *SQLStore) DoDecryptionTxn(ctx context.Context, fn func(context.Context) error) error {
+	if s.DisableDecryptedEventBuffer {
+		return fn(ctx)
+	}
 	ctx = context.WithValue(ctx, dbutil.ContextKeyDoTxnCallerSkip, 2)
 	return s.db.DoTxn(ctx, nil, fn)
 }
 
 func (s *SQLStore) ClearBufferedEventPlaintext(ctx context.Context, ciphertextHash [32]byte) error {
+	if s.DisableDecryptedEventBuffer {
+		return nil
+	}
 	if s.db.Dialect == dbutil.MSSQL {
 		_, err := s.db.Exec(ctx, mssqlClearBufferedEventPlaintextQuery, s.JID, ciphertextHash[:])
 		return err
