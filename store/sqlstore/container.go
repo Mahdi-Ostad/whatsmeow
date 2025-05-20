@@ -146,7 +146,7 @@ platform, business_name, push_name, facebook_uuid, manager_id, locktime
 FROM whatsmeow_device
 WHERE manager_id = @p1 AND locktime = @p2`
 
-const getDeviceByManagerIdNoLock = `SELECT jid, registration_id, noise_key, identity_key,
+const getDeviceByManagerIdNoLock = `SELECT jid, lid, registration_id, noise_key, identity_key,
 signed_pre_key, signed_pre_key_id, signed_pre_key_sig,
 adv_key, adv_details, adv_account_sig, adv_account_sig_key, adv_device_sig,
 platform, business_name, push_name, facebook_uuid, manager_id, locktime
@@ -377,11 +377,11 @@ func (c *Container) NewDevice(managerId string) *store.Device {
 		Log:       c.log,
 		Container: c,
 
-		ManagerId:            managerId,
-		NoiseKey:             keys.NewKeyPair(),
-		IdentityKey:          keys.NewKeyPair(),
-		RegistrationID:       mathRand.Uint32(),
-		AdvSecretKey:         random.Bytes(32),
+		ManagerId:      managerId,
+		NoiseKey:       keys.NewKeyPair(),
+		IdentityKey:    keys.NewKeyPair(),
+		RegistrationID: mathRand.Uint32(),
+		AdvSecretKey:   random.Bytes(32),
 	}
 	device.SignedPreKey = device.IdentityKey.CreateSignedPreKey(1)
 	device.Identities = innerStore
