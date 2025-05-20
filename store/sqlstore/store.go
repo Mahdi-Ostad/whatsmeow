@@ -1507,15 +1507,16 @@ func (s *SQLStore) GetPrivacyToken(ctx context.Context, user types.JID) (*store.
 }
 
 const (
-	getCacheSessionQuery     = `SELECT their_id, session FROM whatsmeow_sessions WITH (NOLOCK) WHERE our_jid=@p1 AND their_id IN `
-	getCacheIdentityQuery    = `SELECT their_id, identity_info FROM whatsmeow_identity_keys WITH (NOLOCK) WHERE our_jid=@p1 AND their_id IN `
-	removeSessionsQuery      = `DELETE FROM whatsmeow_sessions WHERE our_jid=@p1 AND their_id IN `
-	removeIdentityKeysQuery  = `DELETE FROM whatsmeow_identity_keys WHERE our_jid=@p1 AND their_id IN `
-	mssqlPutNodeWithGroup    = `INSERT INTO whatsapp_message_node (our_jid, their_jid, group_id, node) VALUES (@p1, @p2, @p3, @p4)`
-	mssqlPutNodeWithoutGroup = `INSERT INTO whatsapp_message_node (our_jid, their_jid, node) VALUES (@p1, @p2, @p3)`
-	getNodesByGroup          = `SELECT id, node FROM whatsapp_message_node WITH (NOLOCK) WHERE our_jid=@p1 AND group_id=@p2`
-	getNodesByPerson         = `SELECT id, node FROM whatsapp_message_node WITH (NOLOCK) WHERE our_jid=@p1 AND their_jid=@p2`
-	removeMessageNodeQuery   = `DELETE FROM whatsapp_message_node WHERE id=@p1`
+	getCacheSessionQuery      = `SELECT their_id, session FROM whatsmeow_sessions WITH (NOLOCK) WHERE our_jid=@p1 AND their_id IN `
+	getCacheIdentityQuery     = `SELECT their_id, identity_info FROM whatsmeow_identity_keys WITH (NOLOCK) WHERE our_jid=@p1 AND their_id IN `
+	removeSessionsQuery       = `DELETE FROM whatsmeow_sessions WHERE our_jid=@p1 AND their_id IN `
+	removeIdentityKeysQuery   = `DELETE FROM whatsmeow_identity_keys WHERE our_jid=@p1 AND their_id IN `
+	mssqlPutNodeWithGroup     = `INSERT INTO whatsapp_message_node (our_jid, their_jid, group_id, node, insert_timestamp) VALUES (@p1, @p2, @p3, @p4, @p5)`
+	mssqlPutNodeWithoutGroup  = `INSERT INTO whatsapp_message_node (our_jid, their_jid, node, insert_timestamp) VALUES (@p1, @p2, @p3, @p4)`
+	getNodesByGroup           = `SELECT id, node FROM whatsapp_message_node WITH (NOLOCK) WHERE our_jid=@p1 AND group_id=@p2`
+	getNodesByPerson          = `SELECT id, node FROM whatsapp_message_node WITH (NOLOCK) WHERE our_jid=@p1 AND their_jid=@p2`
+	removeMessageNodeQuery    = `DELETE FROM whatsapp_message_node WHERE id=@p1`
+	removeOldMessageNodeQuery = `DELETE FROM whatsapp_message_node WHERE insert_timestamp < @p1`
 )
 
 func (s *SQLStore) CacheSessions(ctx context.Context, addresses []string) (final map[string][]byte) {
@@ -1653,11 +1654,11 @@ func (s *SQLStore) PutMessageNode(ctx context.Context, user string, group *strin
 	}
 	if group != nil {
 		if s.db.Dialect == dbutil.MSSQL {
-			_, err = s.db.Exec(ctx, mssqlPutNodeWithGroup, s.JID, user, *group, nodeData)
+			_, err = s.db.Exec(ctx, mssqlPutNodeWithGroup, s.JID, user, *group, nodeData, time.Now().UnixMilli())
 		}
 	} else {
 		if s.db.Dialect == dbutil.MSSQL {
-			_, err = s.db.Exec(ctx, mssqlPutNodeWithoutGroup, s.JID, user, nodeData)
+			_, err = s.db.Exec(ctx, mssqlPutNodeWithoutGroup, s.JID, user, nodeData, time.Now().UnixMilli())
 		}
 	}
 	return err
@@ -1707,6 +1708,10 @@ func (s *SQLStore) DeleteMessageNode(ctx context.Context, ref int) (err error) {
 	_, err = s.db.Exec(ctx, removeMessageNodeQuery, ref)
 	return err
 }
+func (s *SQLStore) DeleteOldMessageNodes(ctx context.Context) (err error) {
+	_, err = s.db.Exec(ctx, removeOldMessageNodeQuery, time.Now().Add(-14*24*time.Hour).UnixMilli())
+	return err
+}
 
 const (
 	sqliteGetBufferedEventQuery = `
@@ -1729,8 +1734,11 @@ const (
 	mssqlClearBufferedEventPlaintextQuery = `
 		UPDATE whatsmeow_event_buffer SET plaintext = NULL WHERE our_jid = @p1 AND ciphertext_hash = @p2
 	`
-	deleteOldBufferedHashesQuery = `
+	sqliteDeleteOldBufferedHashesQuery = `
 		DELETE FROM whatsmeow_event_buffer WHERE insert_timestamp < $1
+	`
+	mssqlDeleteOldBufferedHashesQuery = `
+		DELETE FROM whatsmeow_event_buffer WHERE insert_timestamp < @p1
 	`
 )
 
@@ -1779,6 +1787,10 @@ func (s *SQLStore) ClearBufferedEventPlaintext(ctx context.Context, ciphertextHa
 func (s *SQLStore) DeleteOldBufferedHashes(ctx context.Context) error {
 	// The WhatsApp servers only buffer events for 14 days,
 	// so we can safely delete anything older than that.
-	_, err := s.db.Exec(ctx, deleteOldBufferedHashesQuery, time.Now().Add(-14*24*time.Hour).UnixMilli())
+	if s.db.Dialect == dbutil.MSSQL {
+		_, err := s.db.Exec(ctx, mssqlDeleteOldBufferedHashesQuery, time.Now().Add(-14*24*time.Hour).UnixMilli())
+		return err
+	}
+	_, err := s.db.Exec(ctx, sqliteDeleteOldBufferedHashesQuery, time.Now().Add(-14*24*time.Hour).UnixMilli())
 	return err
 }

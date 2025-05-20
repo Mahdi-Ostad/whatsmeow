@@ -178,6 +178,7 @@ type PrekeysCacheStore interface {
 	GetMessageNodesByUser(ctx context.Context, user string) (map[int]waBinary.Node, error)
 	GetMessageNodesByGroup(ctx context.Context, group string) (map[int]waBinary.Node, error)
 	DeleteMessageNode(ctx context.Context, ref int) error
+	DeleteOldMessageNodes(ctx context.Context) error
 }
 
 type AllGlobalStores interface {
@@ -207,25 +208,25 @@ type Device struct {
 
 	FacebookUUID uuid.UUID
 
-	Initialized          bool
-	Identities           IdentityStore
-	Sessions             SessionStore
-	PreKeys              PreKeyStore
-	SenderKeys           SenderKeyStore
-	AppStateKeys         AppStateSyncKeyStore
-	AppState             AppStateStore
-	Contacts             ContactStore
-	ChatSettings         ChatSettingsStore
-	MsgSecrets           MsgSecretStore
-	PrivacyTokens        PrivacyTokenStore
-	PrekeysCache         PrekeysCacheStore
-	EventBuffer          EventBuffer
-	LIDs                 LIDStore
-	Container            DeviceContainer
-	ManagerId            string
-	LockTime             int64
-	SessionsCache        map[string][]byte
-	IdentityCache        map[string][32]byte
+	Initialized   bool
+	Identities    IdentityStore
+	Sessions      SessionStore
+	PreKeys       PreKeyStore
+	SenderKeys    SenderKeyStore
+	AppStateKeys  AppStateSyncKeyStore
+	AppState      AppStateStore
+	Contacts      ContactStore
+	ChatSettings  ChatSettingsStore
+	MsgSecrets    MsgSecretStore
+	PrivacyTokens PrivacyTokenStore
+	PrekeysCache  PrekeysCacheStore
+	EventBuffer   EventBuffer
+	LIDs          LIDStore
+	Container     DeviceContainer
+	ManagerId     string
+	LockTime      int64
+	SessionsCache map[string][]byte
+	IdentityCache map[string][32]byte
 }
 
 func (device *Device) GetJID() types.JID {
