@@ -17,6 +17,7 @@ import (
 
 	"github.com/rs/zerolog"
 
+	"go.mau.fi/util/dbutil"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 )
@@ -42,14 +43,26 @@ func NewCachedLIDMap(db *RetryDB) *CachedLIDMap {
 }
 
 const (
-	deleteExistingLIDMappingQuery = `DELETE FROM whatsmeow_lid_map WHERE (lid<>$1 AND pn=$2)`
-	putLIDMappingQuery            = `
+	sqliteDeleteExistingLIDMappingQuery = `DELETE FROM whatsmeow_lid_map WHERE (lid<>$1 AND pn=$2)`
+	mssqlDeleteExistingLIDMappingQuery  = `DELETE FROM whatsmeow_lid_map WHERE (lid<>@p1 AND pn=@p2)`
+	sqlitePutLIDMappingQuery            = `
 		INSERT INTO whatsmeow_lid_map (lid, pn)
 		VALUES ($1, $2)
 		ON CONFLICT (lid) DO UPDATE SET pn=excluded.pn WHERE whatsmeow_lid_map.pn<>excluded.pn
 	`
-	getLIDForPNQuery       = `SELECT lid FROM whatsmeow_lid_map WHERE pn=$1`
-	getPNForLIDQuery       = `SELECT pn FROM whatsmeow_lid_map WHERE lid=$1`
+	mssqlPutLIDMappingQuery = `
+		MERGE INTO whatsmeow_lid_map AS Target
+		USING (VALUES (@p1, @p2)) AS Source (lid, pn)
+		ON Target.lid = Source.lid
+		WHEN MATCHED THEN
+		    UPDATE SET pn = Source.pn
+		WHEN NOT MATCHED THEN
+		    INSERT (lid, pn) VALUES (Source.lid, Source.pn);
+	`
+	sqliteGetLIDForPNQuery = `SELECT lid FROM whatsmeow_lid_map WHERE pn=$1`
+	mssqlGetLIDForPNQuery  = `SELECT lid FROM whatsmeow_lid_map WHERE pn=@p1`
+	sqliteGetPNForLIDQuery = `SELECT pn FROM whatsmeow_lid_map WHERE lid=$1`
+	mssqlGetPNForLIDQuery  = `SELECT pn FROM whatsmeow_lid_map WHERE lid=@p1`
 	getAllLIDMappingsQuery = `SELECT lid, pn FROM whatsmeow_lid_map`
 )
 
@@ -105,8 +118,14 @@ func (s *CachedLIDMap) GetLIDForPN(ctx context.Context, pn types.JID) (types.JID
 	if pn.Server != types.DefaultUserServer {
 		return types.JID{}, fmt.Errorf("invalid GetLIDForPN call with non-PN JID %s", pn)
 	}
+	if s.db.Dialect == dbutil.MSSQL {
+		return s.getLIDMapping(
+			ctx, pn, types.HiddenUserServer, mssqlGetLIDForPNQuery,
+			s.pnToLIDCache, s.lidToPNCache,
+		)
+	}
 	return s.getLIDMapping(
-		ctx, pn, types.HiddenUserServer, getLIDForPNQuery,
+		ctx, pn, types.HiddenUserServer, sqliteGetLIDForPNQuery,
 		s.pnToLIDCache, s.lidToPNCache,
 	)
 }
@@ -115,8 +134,14 @@ func (s *CachedLIDMap) GetPNForLID(ctx context.Context, lid types.JID) (types.JI
 	if lid.Server != types.HiddenUserServer {
 		return types.JID{}, fmt.Errorf("invalid GetPNForLID call with non-LID JID %s", lid)
 	}
+	if s.db.Dialect == dbutil.MSSQL {
+		return s.getLIDMapping(
+			ctx, lid, types.DefaultUserServer, mssqlGetPNForLIDQuery,
+			s.lidToPNCache, s.pnToLIDCache,
+		)
+	}
 	return s.getLIDMapping(
-		ctx, lid, types.DefaultUserServer, getPNForLIDQuery,
+		ctx, lid, types.DefaultUserServer, sqliteGetPNForLIDQuery,
 		s.lidToPNCache, s.pnToLIDCache,
 	)
 }
@@ -171,14 +196,26 @@ func (s *CachedLIDMap) unlockedPutLIDMapping(ctx context.Context, lid, pn types.
 	if lid.Server != types.HiddenUserServer || pn.Server != types.DefaultUserServer {
 		return fmt.Errorf("invalid PutLIDMapping call %s/%s", lid, pn)
 	}
-	_, err := s.db.Exec(ctx, deleteExistingLIDMappingQuery, lid.User, pn.User)
-	if err != nil {
-		return err
+	if s.db.Dialect == dbutil.MSSQL {
+		_, err := s.db.Exec(ctx, mssqlDeleteExistingLIDMappingQuery, lid.User, pn.User)
+		if err != nil {
+			return err
+		}
+		_, err = s.db.Exec(ctx, mssqlPutLIDMappingQuery, lid.User, pn.User)
+		if err != nil {
+			return err
+		}
+	} else {
+		_, err := s.db.Exec(ctx, sqliteDeleteExistingLIDMappingQuery, lid.User, pn.User)
+		if err != nil {
+			return err
+		}
+		_, err = s.db.Exec(ctx, sqlitePutLIDMappingQuery, lid.User, pn.User)
+		if err != nil {
+			return err
+		}
 	}
-	_, err = s.db.Exec(ctx, putLIDMappingQuery, lid.User, pn.User)
-	if err != nil {
-		return err
-	}
+
 	s.pnToLIDCache[pn.User] = lid.User
 	s.lidToPNCache[lid.User] = pn.User
 	return nil
