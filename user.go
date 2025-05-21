@@ -224,7 +224,7 @@ func (cli *Client) GetUserInfo(jids []types.JID) (map[types.JID]types.UserInfo, 
 		info.PictureID, _ = child.GetChildByTag("picture").Attrs["id"].(string)
 		info.Devices = parseDeviceList(jid, child.GetChildByTag("devices"))
 		if verifiedName != nil {
-			cli.updateBusinessName(context.TODO(), jid, nil, verifiedName.Details.GetVerifiedName())
+			cli.updateBusinessName(context.Background(), jid, nil, verifiedName.Details.GetVerifiedName())
 		}
 		respData[jid] = info
 	}

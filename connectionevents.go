@@ -17,7 +17,7 @@ import (
 )
 
 func (cli *Client) handleStreamError(node *waBinary.Node) {
-	ctx := context.TODO()
+	ctx := context.Background()
 	cli.isLoggedIn.Store(false)
 	cli.clearResponseWaiters(node)
 	cli.HasFailedLogin = true
@@ -95,7 +95,7 @@ func (cli *Client) handleIB(node *waBinary.Node) {
 }
 
 func (cli *Client) handleConnectFailure(node *waBinary.Node) {
-	ctx := context.TODO()
+	ctx := context.Background()
 	ag := node.AttrGetter()
 	reason := events.ConnectFailureReason(ag.Int("reason"))
 	message := ag.OptionalString("message")
@@ -152,7 +152,7 @@ func (cli *Client) handleConnectFailure(node *waBinary.Node) {
 }
 
 func (cli *Client) handleConnectSuccess(node *waBinary.Node) {
-	ctx := context.TODO()
+	ctx := context.Background()
 	cli.Log.Infof("Successfully authenticated")
 	cli.LastSuccessfulConnect = time.Now()
 	cli.AutoReconnectErrors = 0

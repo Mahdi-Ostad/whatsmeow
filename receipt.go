@@ -24,7 +24,7 @@ func (cli *Client) handleReceipt(node *waBinary.Node) {
 	} else if receipt != nil {
 		if receipt.Type == types.ReceiptTypeRetry {
 			go func() {
-				err := cli.handleRetryReceipt(context.TODO(), receipt, node)
+				err := cli.handleRetryReceipt(context.Background(), receipt, node)
 				if err != nil {
 					cli.Log.Errorf("Failed to handle retry receipt for %s/%s from %s: %v", receipt.Chat, receipt.MessageIDs[0], receipt.Sender, err)
 				}
@@ -170,7 +170,7 @@ func (cli *Client) MarkRead(ids []types.MessageID, timestamp time.Time, chat, se
 			"t":    timestamp.Unix(),
 		},
 	}
-	if chat.Server == types.NewsletterServer || cli.GetPrivacySettings(context.TODO()).ReadReceipts == types.PrivacySettingNone {
+	if chat.Server == types.NewsletterServer || cli.GetPrivacySettings(context.Background()).ReadReceipts == types.PrivacySettingNone {
 		switch receiptType {
 		case types.ReceiptTypeRead:
 			node.Attrs["type"] = string(types.ReceiptTypeReadSelf)

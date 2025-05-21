@@ -94,7 +94,7 @@ func (cli *Client) handlePairSuccess(node *waBinary.Node) {
 	platform, _ := pairSuccess.GetChildByTag("platform").Attrs["name"].(string)
 
 	go func() {
-		err := cli.handlePair(context.TODO(), deviceIdentityBytes, id, businessName, platform, jid, lid)
+		err := cli.handlePair(context.Background(), deviceIdentityBytes, id, businessName, platform, jid, lid)
 		if err != nil {
 			cli.Log.Errorf("Failed to pair device: %v", err)
 			cli.Disconnect()

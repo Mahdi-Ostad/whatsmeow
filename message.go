@@ -39,7 +39,7 @@ import (
 var pbSerializer = store.SignalProtobufSerializer
 
 func (cli *Client) handleEncryptedMessage(node *waBinary.Node) {
-	ctx := context.TODO()
+	ctx := context.Background()
 	info, err := cli.parseMessageInfo(node)
 	if err != nil {
 		cli.Log.Warnf("Failed to parse message: %v", err)
@@ -720,7 +720,7 @@ func (cli *Client) handleHistorySyncNotificationLoop() {
 			go cli.handleHistorySyncNotificationLoop()
 		}
 	}()
-	ctx := context.TODO()
+	ctx := context.Background()
 	for notif := range cli.historySyncNotifications {
 		cli.handleHistorySyncNotification(ctx, notif)
 	}
