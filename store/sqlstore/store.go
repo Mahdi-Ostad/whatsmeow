@@ -425,16 +425,16 @@ const (
 	mssqlMigratePNToLIDIdentityKeysQuery = `
 		MERGE INTO whatsmeow_identity_keys AS target
 		USING (
-    		SELECT our_jid, REPLACE(their_id, @p2, @p3) AS their_id, identity
+    		SELECT our_jid, REPLACE(their_id, @p2, @p3) AS their_id, identity_info
     		FROM whatsmeow_identity_keys
     		WHERE our_jid = @p1 AND their_id LIKE @p2 + ':%'
 		) AS source
 		ON target.our_jid = source.our_jid AND target.their_id = source.their_id
 		WHEN MATCHED THEN
-    		UPDATE SET identity = source.identity
+    		UPDATE SET identity_info = source.identity_info
 		WHEN NOT MATCHED THEN
-    		INSERT (our_jid, their_id, identity)
-    		VALUES (source.our_jid, source.their_id, source.identity);`
+    		INSERT (our_jid, their_id, identity_info)
+    		VALUES (source.our_jid, source.their_id, source.identity_info);`
 	sqliteMigratePNToLIDSenderKeysQuery = `
 		INSERT INTO whatsmeow_sender_keys (our_jid, chat_id, sender_id, sender_key)
 		SELECT our_jid, chat_id, replace(sender_id, $2, $3), sender_key
