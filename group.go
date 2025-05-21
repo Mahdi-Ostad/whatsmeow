@@ -524,7 +524,7 @@ func (cli *Client) GetLinkedGroupsParticipants(community types.JID) ([]types.JID
 
 // GetGroupInfo requests basic info about a group chat from the WhatsApp servers.
 func (cli *Client) GetGroupInfo(jid types.JID) (*types.GroupInfo, error) {
-	return cli.getGroupInfo(context.Background(), jid, true)
+	return cli.getGroupInfo(context.TODO(), jid, true)
 }
 
 func (cli *Client) getGroupInfo(ctx context.Context, jid types.JID, lockParticipantCache bool) (*types.GroupInfo, error) {
