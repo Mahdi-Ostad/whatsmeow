@@ -185,7 +185,7 @@ func bulkInsertContacts(ctx context.Context, update contactUpdate) error {
 		}
 		_, err = update.sqlStore.db.Exec(ctx, fmt.Sprintf("DROP TABLE staging_contacts_%d", dt.UnixMilli()))
 		if err != nil {
-			return fmt.Errorf("failed to merge bulk: %w", err)
+			return fmt.Errorf("failed to drop table: %w", err)
 		}
 		return nil
 	})
@@ -1383,7 +1383,7 @@ func (s *SQLStore) PutMessageSecrets(ctx context.Context, inserts []store.Messag
 		}
 		_, err = s.db.Exec(ctx, fmt.Sprintf("DROP TABLE staging_messagesecrets_%d", dt.UnixMilli()))
 		if err != nil {
-			return fmt.Errorf("failed to merge bulk: %w", err)
+			return fmt.Errorf("failed to drop table: %w", err)
 		}
 		if err != nil {
 			return fmt.Errorf("failed to commit transaction: %w", err)
@@ -1477,7 +1477,7 @@ func (s *SQLStore) PutPrivacyTokens(ctx context.Context, tokens ...store.Privacy
 		}
 		_, err = s.db.Exec(ctx, fmt.Sprintf("DROP TABLE staging_privacytokens_%d", dt.UnixMilli()))
 		if err != nil {
-			return fmt.Errorf("failed to merge bulk: %w", err)
+			return fmt.Errorf("failed to drop table: %w", err)
 		}
 		if err != nil {
 			return fmt.Errorf("failed to commit transaction: %w", err)
@@ -1580,71 +1580,131 @@ func (s *SQLStore) CacheIdentities(ctx context.Context, addresses []string) (fin
 }
 
 func (s *SQLStore) StoreSessions(ctx context.Context, sessions map[string][]byte, oldAddresses []string) {
-	if len(oldAddresses) > 0 {
-		query := removeSessionsQuery + "("
-		queryParams := make([]interface{}, len(oldAddresses)+1)
-		queryParams[0] = s.JID
-		for index, address := range oldAddresses {
-			if index > 0 {
-				query += ","
+	s.db.DoTxn(ctx, nil, func(ctx context.Context) error {
+		if len(oldAddresses) > 0 {
+			query := removeSessionsQuery + "("
+			queryParams := make([]interface{}, len(oldAddresses)+1)
+			queryParams[0] = s.JID
+			for index, address := range oldAddresses {
+				if index > 0 {
+					query += ","
+				}
+				query += fmt.Sprintf("@p%d", index+2)
+				queryParams[index+1] = address
 			}
-			query += fmt.Sprintf("@p%d", index+2)
-			queryParams[index+1] = address
+			query += ")"
+			_, err := s.db.Exec(ctx, query, queryParams...)
+			if err != nil {
+				s.log.Errorf("Could not Remove Sessions: " + err.Error())
+				return err
+			}
 		}
-		query += ")"
-		_, err := s.db.Exec(ctx, query, queryParams...)
+		dt := time.Now()
+		_, err := s.db.Exec(ctx, fmt.Sprintf(`CREATE TABLE staging_sessions_%d (
+			our_jid   VARCHAR(300),
+			their_id  VARCHAR(300),
+			session  VARBINARY(max),
+		)`, dt.UnixMilli()))
 		if err != nil {
-			s.log.Errorf("Could not Remove Sessions: " + err.Error())
-			return
+			return fmt.Errorf("failed to create table: %w", err)
 		}
-	}
-	bulkImportStr := mssql.CopyIn("whatsmeow_sessions", mssql.BulkOptions{}, "our_jid", "their_id", "session")
-	stmt, err := s.db.PrepareContext(ctx, bulkImportStr)
-	if err != nil {
-		s.log.Errorf("Could not Prepare Statement: " + err.Error())
-		return
-	}
-	for address, session := range sessions {
-		stmt.Exec(s.JID, address, session[:])
-	}
-	_, err = stmt.Exec()
-	if err != nil {
-		s.log.Errorf("Could not Store Sessions: " + err.Error())
-	}
+		bulkImportStr := mssql.CopyIn(fmt.Sprintf("staging_sessions_%d", dt.UnixMilli()), mssql.BulkOptions{}, "our_jid", "their_id", "session")
+		stmt, err := s.db.PrepareContext(ctx, bulkImportStr)
+		if err != nil {
+			s.log.Errorf("Could not Prepare Statement: " + err.Error())
+			return err
+		}
+		for address, session := range sessions {
+			stmt.Exec(s.JID, address, session[:])
+		}
+		_, err = stmt.Exec()
+		if err != nil {
+			s.log.Errorf("Could not Store Sessions: " + err.Error())
+			return err
+		}
+		_, err = s.db.Exec(ctx, fmt.Sprintf(`MERGE INTO whatsmeow_sessions AS target 
+			USING staging_sessions_%d AS source 
+			ON target.our_jid = source.our_jid AND target.their_id = source.their_id
+			WHEN MATCHED THEN
+				UPDATE SET target.session = source.session 
+			WHEN NOT MATCHED THEN 
+				INSERT (our_jid, their_id, session) 
+				VALUES (source.our_jid, source.their_id, source.session);`, dt.UnixMilli()))
+		if err != nil {
+			s.log.Errorf("failed to merge bulk: " + err.Error())
+			return fmt.Errorf("failed to merge bulk: %w", err)
+		}
+		_, err = s.db.Exec(ctx, fmt.Sprintf("DROP TABLE staging_sessions_%d", dt.UnixMilli()))
+		if err != nil {
+			s.log.Errorf("failed to drop table: " + err.Error())
+			return fmt.Errorf("failed to drop table: %w", err)
+		}
+		return nil
+	})
 }
 
 func (s *SQLStore) StoreIdentities(ctx context.Context, identityKeys map[string][32]byte, oldAddresses []string) {
-	if len(oldAddresses) > 0 {
-		query := removeIdentityKeysQuery + "("
-		queryParams := make([]interface{}, len(oldAddresses)+1)
-		queryParams[0] = s.JID
-		for index, address := range oldAddresses {
-			if index > 0 {
-				query += ","
+	s.db.DoTxn(ctx, nil, func(ctx context.Context) error {
+		if len(oldAddresses) > 0 {
+			query := removeIdentityKeysQuery + "("
+			queryParams := make([]interface{}, len(oldAddresses)+1)
+			queryParams[0] = s.JID
+			for index, address := range oldAddresses {
+				if index > 0 {
+					query += ","
+				}
+				query += fmt.Sprintf("@p%d", index+2)
+				queryParams[index+1] = address
 			}
-			query += fmt.Sprintf("@p%d", index+2)
-			queryParams[index+1] = address
+			query += ")"
+			_, err := s.db.Exec(ctx, query, queryParams...)
+			if err != nil {
+				s.log.Errorf("Could not Remove Identity Keys: " + err.Error())
+				return err
+			}
 		}
-		query += ")"
-		_, err := s.db.Exec(ctx, query, queryParams...)
+		dt := time.Now()
+		_, err := s.db.Exec(ctx, fmt.Sprintf(`CREATE TABLE staging_identitykeys_%d (
+			our_jid  VARCHAR(300),
+			their_id VARCHAR(300),
+			identity_info VARBINARY(max) NOT NULL CHECK ( LEN(identity_info) = 32 ),
+		)`, dt.UnixMilli()))
 		if err != nil {
-			s.log.Errorf("Could not Remove Identity Keys: " + err.Error())
-			return
+			return fmt.Errorf("failed to create table: %w", err)
 		}
-	}
-	bulkImportStr := mssql.CopyIn("whatsmeow_identity_keys", mssql.BulkOptions{}, "our_jid", "their_id", "identity_info")
-	stmt, err := s.db.PrepareContext(ctx, bulkImportStr)
-	if err != nil {
-		s.log.Errorf("Could not Prepare Statement: " + err.Error())
-		return
-	}
-	for address, identityInfo := range identityKeys {
-		stmt.Exec(s.JID, address, identityInfo[:])
-	}
-	_, err = stmt.Exec()
-	if err != nil {
-		s.log.Errorf("Could not Store Identity Keys: " + err.Error())
-	}
+		bulkImportStr := mssql.CopyIn(fmt.Sprintf("staging_identitykeys_%d", dt.UnixMilli()), mssql.BulkOptions{}, "our_jid", "their_id", "identity_info")
+		stmt, err := s.db.PrepareContext(ctx, bulkImportStr)
+		if err != nil {
+			s.log.Errorf("Could not Prepare Statement: " + err.Error())
+			return err
+		}
+		for address, identityInfo := range identityKeys {
+			stmt.Exec(s.JID, address, identityInfo[:])
+		}
+		_, err = stmt.Exec()
+		if err != nil {
+			s.log.Errorf("Could not Store Identity Keys: " + err.Error())
+			return err
+		}
+		_, err = s.db.Exec(ctx, fmt.Sprintf(`MERGE INTO whatsmeow_identity_keys AS target
+			USING staging_identitykeys_%d AS source
+			ON target.our_jid = source.our_jid AND target.their_id = source.their_id
+			WHEN MATCHED THEN
+				UPDATE SET target.identity_info = source.identity_info
+			WHEN NOT MATCHED THEN
+				INSERT (our_jid, their_id, identity_info)
+				VALUES (source.our_jid, source.their_id, source.identity_info);`, dt.UnixMilli()))
+		if err != nil {
+			s.log.Errorf("failed to merge bulk: " + err.Error())
+			return fmt.Errorf("failed to merge bulk: %w", err)
+		}
+		_, err = s.db.Exec(ctx, fmt.Sprintf("DROP TABLE staging_identitykeys_%d", dt.UnixMilli()))
+		if err != nil {
+			s.log.Errorf("failed to drop table: " + err.Error())
+			return fmt.Errorf("failed to drop table: %w", err)
+		}
+		return nil
+	})
 }
 
 func (s *SQLStore) PutMessageNode(ctx context.Context, user string, group *string, node *waBinary.Node) (err error) {
