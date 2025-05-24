@@ -48,7 +48,7 @@ var dbInstance *sql.DB
 // When using SQLite, it's strongly recommended to enable foreign keys by adding `?_foreign_keys=true`:
 //
 //	container, err := sqlstore.New(context.Background(), "sqlite3", "file:yoursqlitefile.db?_foreign_keys=on", nil)
-func New(ctx context.Context, dialect, address string, log waLog.Logger, maxConnection int) (*Container, error) {
+func New(ctx context.Context, dialect, address string, log waLog.Logger, dbLogger dbutil.DatabaseLogger, maxConnection int) (*Container, error) {
 	if dbInstance == nil {
 		db, err := sql.Open(dialect, address)
 		if err != nil {
@@ -58,7 +58,7 @@ func New(ctx context.Context, dialect, address string, log waLog.Logger, maxConn
 		db.SetMaxIdleConns(maxConnection)
 		dbInstance = db
 	}
-	container := NewWithDB(dbInstance, dialect, log)
+	container := NewWithDB(dbInstance, dialect, log, dbLogger)
 	err := container.Upgrade(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to upgrade database: %w", err)
@@ -84,7 +84,8 @@ func New(ctx context.Context, dialect, address string, log waLog.Logger, maxConn
 //
 //	container := sqlstore.NewWithDB(...)
 //	err := container.Upgrade()
-func NewWithDB(db *sql.DB, dialect string, log waLog.Logger) *Container {
+func NewWithDB(db *sql.DB, dialect string, log waLog.Logger, dbLogger dbutil.DatabaseLogger) *Container {
+	dbutil.NoopLogger = dbLogger
 	wrapped, err := dbutil.NewWithDB(db, dialect)
 	if err != nil {
 		// This will only panic if the dialect is invalid
