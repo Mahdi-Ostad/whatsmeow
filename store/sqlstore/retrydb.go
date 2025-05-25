@@ -24,6 +24,6 @@ func (db *RetryDB) Exec(ctx context.Context, query string, args ...any) (res sql
 	return
 }
 
-func (db *RetryDB) PrepareContext(ctx context.Context, query string) (*sql.Stmt, error) {
+func (db *RetryDB) PrepareContext(ctx context.Context, query string) (dbutil.LoggingStmt, error) {
 	return db.Execable(ctx).PrepareContext(ctx, query)
 }
