@@ -42,7 +42,7 @@ func (cli *Client) handleStreamError(node *waBinary.Node) {
 	case code == "401" && conflictType == "device_removed":
 		cli.expectDisconnect()
 		cli.Log.Infof("Got device removed stream error, sending LoggedOut event and deleting session")
-		go cli.dispatchEvent(&events.LoggedOut{OnConnect: false, Reason: events.ConnectFailureLoggedOut})
+		go cli.dispatchEvent(&events.LoggedOut{OnConnect: false, Reason: events.ConnectFailureLoggedOut, ManagerId: cli.Store.ManagerId})
 		err := cli.Store.Delete(ctx)
 		if err != nil {
 			cli.Log.Warnf("Failed to delete store after device_removed error: %v", err)
@@ -121,7 +121,7 @@ func (cli *Client) handleConnectFailure(node *waBinary.Node) {
 	}
 	if reason.IsLoggedOut() {
 		cli.Log.Infof("Got %s connect failure, sending LoggedOut event and deleting session", reason)
-		go cli.dispatchEvent(&events.LoggedOut{OnConnect: true, Reason: reason})
+		go cli.dispatchEvent(&events.LoggedOut{OnConnect: true, Reason: reason, ManagerId: cli.Store.ManagerId})
 		err := cli.Store.Delete(ctx)
 		if err != nil {
 			cli.Log.Warnf("Failed to delete store after %d failure: %v", int(reason), err)

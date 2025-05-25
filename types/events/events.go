@@ -106,7 +106,8 @@ type LoggedOut struct {
 	// If it's false, the event was triggered by a stream:error message.
 	OnConnect bool
 	// If OnConnect is true, then this field contains the reason code.
-	Reason ConnectFailureReason
+	Reason    ConnectFailureReason
+	ManagerId string
 }
 
 // StreamReplaced is emitted when the client is disconnected by another client connecting with the same keys.
