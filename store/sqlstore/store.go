@@ -95,12 +95,12 @@ type putMessageSecretUpdate struct {
 }
 
 var sqlInstance *RetryDB
-var contactsChannel = make(chan contactUpdate)
-var senderkeysChannel = make(chan senderkeyUpdate)
-var sessionChannel = make(chan sessionUpdate)
-var identityChannel = make(chan identityUpdate)
-var removePreKeyChannel = make(chan removePreKeyUpdate)
-var putMessageSecretChannel = make(chan putMessageSecretUpdate)
+var contactsChannel = make(chan contactUpdate, 1000)
+var senderkeysChannel = make(chan senderkeyUpdate, 1000)
+var sessionChannel = make(chan sessionUpdate, 1000)
+var identityChannel = make(chan identityUpdate, 1000)
+var removePreKeyChannel = make(chan removePreKeyUpdate, 1000)
+var putMessageSecretChannel = make(chan putMessageSecretUpdate, 1000)
 
 // NewSQLStore creates a new SQLStore with the given database container and user JID.
 // It contains implementations of all the different stores in the store package.
@@ -335,14 +335,12 @@ const (
 )
 
 func (s *SQLStore) PutIdentity(ctx context.Context, address string, key [32]byte) error {
-	go func() {
-		identityChannel <- identityUpdate{
-			sqlStore: s,
-			address:  address,
-			key:      key,
-			isAdd:    true,
-		}
-	}()
+	identityChannel <- identityUpdate{
+		sqlStore: s,
+		address:  address,
+		key:      key,
+		isAdd:    true,
+	}
 	return nil
 }
 
@@ -352,13 +350,11 @@ func (s *SQLStore) DeleteAllIdentities(ctx context.Context, phone string) error 
 }
 
 func (s *SQLStore) DeleteIdentity(ctx context.Context, address string) error {
-	go func() {
-		identityChannel <- identityUpdate{
-			sqlStore: s,
-			address:  address,
-			isAdd:    false,
-		}
-	}()
+	identityChannel <- identityUpdate{
+		sqlStore: s,
+		address:  address,
+		isAdd:    false,
+	}
 	return nil
 }
 
@@ -490,14 +486,12 @@ func (s *SQLStore) HasSession(ctx context.Context, address string) (has bool, er
 }
 
 func (s *SQLStore) PutSession(ctx context.Context, address string, session []byte) error {
-	go func() {
-		sessionChannel <- sessionUpdate{
-			sqlStore: s,
-			address:  address,
-			session:  session,
-			isAdd:    true,
-		}
-	}()
+	sessionChannel <- sessionUpdate{
+		sqlStore: s,
+		address:  address,
+		session:  session,
+		isAdd:    true,
+	}
 	return nil
 }
 
@@ -529,13 +523,11 @@ func (s *SQLStore) deleteAllIdentityKeys(ctx context.Context, phone string) erro
 }
 
 func (s *SQLStore) DeleteSession(ctx context.Context, address string) error {
-	go func() {
-		sessionChannel <- sessionUpdate{
-			sqlStore: s,
-			address:  address,
-			isAdd:    false,
-		}
-	}()
+	sessionChannel <- sessionUpdate{
+		sqlStore: s,
+		address:  address,
+		isAdd:    false,
+	}
 	return nil
 }
 
@@ -732,12 +724,10 @@ func (s *SQLStore) GetPreKey(ctx context.Context, id uint32) (*keys.PreKey, erro
 }
 
 func (s *SQLStore) RemovePreKey(ctx context.Context, id uint32) error {
-	go func() {
-		removePreKeyChannel <- removePreKeyUpdate{
-			sqlStore: s,
-			id:       id,
-		}
-	}()
+	removePreKeyChannel <- removePreKeyUpdate{
+		sqlStore: s,
+		id:       id,
+	}
 	return nil
 }
 
@@ -780,14 +770,12 @@ const (
 )
 
 func (s *SQLStore) PutSenderKey(ctx context.Context, group, user string, session []byte) error {
-	go func() {
-		senderkeysChannel <- senderkeyUpdate{
-			group:    group,
-			user:     user,
-			session:  session,
-			sqlStore: s,
-		}
-	}()
+	senderkeysChannel <- senderkeyUpdate{
+		group:    group,
+		user:     user,
+		session:  session,
+		sqlStore: s,
+	}
 	return nil
 }
 
@@ -1177,12 +1165,10 @@ func (s *SQLStore) putContactNamesBatch(ctx context.Context, contacts []store.Co
 }
 
 func (s *SQLStore) PutAllContactNames(ctx context.Context, contacts []store.ContactEntry) error {
-	go func() {
-		contactsChannel <- contactUpdate{
-			sqlStore: s,
-			contacts: contacts,
-		}
-	}()
+	contactsChannel <- contactUpdate{
+		sqlStore: s,
+		contacts: contacts,
+	}
 	return nil
 }
 
@@ -1393,15 +1379,13 @@ func (s *SQLStore) PutMessageSecrets(ctx context.Context, inserts []store.Messag
 }
 
 func (s *SQLStore) PutMessageSecret(ctx context.Context, chat, sender types.JID, id types.MessageID, secret []byte) (err error) {
-	go func() {
-		putMessageSecretChannel <- putMessageSecretUpdate{
-			sqlStore: s,
-			chat:     chat,
-			sender:   sender,
-			id:       id,
-			secret:   secret,
-		}
-	}()
+	putMessageSecretChannel <- putMessageSecretUpdate{
+		sqlStore: s,
+		chat:     chat,
+		sender:   sender,
+		id:       id,
+		secret:   secret,
+	}
 	return nil
 }
 
