@@ -55,8 +55,6 @@ type SQLStore struct {
 	migratedPNSessionsCache *exsync.Set[string]
 }
 
-var sessionsLock = exsync.NewLockMap[string]()
-
 type contactUpdate struct {
 	sqlStore *SQLStore
 	contacts []store.ContactEntry
@@ -69,11 +67,32 @@ type senderkeyUpdate struct {
 	session  []byte
 }
 
-type sessionUpdate struct {
+type sessionPut struct {
 	sqlStore *SQLStore
 	address  string
 	session  []byte
-	isAdd    bool
+}
+
+type sessionDelete struct {
+	sqlStore *SQLStore
+	address  string
+	session  []byte
+}
+
+type sessionMigratePnToLID struct {
+	sqlStore *SQLStore
+	pn, lid  types.JID
+}
+
+type sessionDeleteAll struct {
+	sqlStore *SQLStore
+	phone    string
+}
+
+type sessionBulkInsert struct {
+	sqlStore     *SQLStore
+	sessions     map[string][]byte
+	oldAddresses []string
 }
 
 type identityUpdate struct {
@@ -99,7 +118,7 @@ type putMessageSecretUpdate struct {
 var sqlInstance *RetryDB
 var contactsChannel = make(chan contactUpdate, 1000)
 var senderkeysChannel = make(chan senderkeyUpdate, 1000)
-var sessionChannel = make(chan sessionUpdate, 1000)
+var sessionChannel = make(chan interface{}, 10000)
 var identityChannel = make(chan identityUpdate, 1000)
 var removePreKeyChannel = make(chan removePreKeyUpdate, 1000)
 var putMessageSecretChannel = make(chan putMessageSecretUpdate, 1000)
@@ -216,22 +235,33 @@ func manageSingleSenderKey(ctx context.Context, senderkeyUpdate senderkeyUpdate)
 func ManageSessions(ctx context.Context, logger waLog.Logger) {
 	for update := range sessionChannel {
 		var err error
-		if update.isAdd {
-			err = putSingleSession(ctx, update)
-		} else {
-			err = deleteSingleSession(ctx, update)
+		messageType := ""
+		switch u := update.(type) {
+		case sessionPut:
+			err = putSingleSession(ctx, u)
+			messageType = "Put Session"
+		case sessionDelete:
+			err = deleteSingleSession(ctx, u)
+			messageType = "Delete Session"
+		case sessionMigratePnToLID:
+			err = migratePNToLIDSingleSession(ctx, u)
+			messageType = "Migrate PN to LID Session"
+		case sessionDeleteAll:
+			err = u.sqlStore.deleteAllSessions(ctx, u.phone)
+			messageType = "Delete All Sessions"
+		case sessionBulkInsert:
+			err = storeSessionsFromChan(ctx, u)
+			messageType = "Bulk Insert Sessions"
 		}
 		if err != nil {
-			logger.Errorf("Could Not Update Session %s: %s", update.address, err.Error())
+			logger.Errorf("Could Not Update Session %s: %s", messageType, err.Error())
 		}
 	}
 }
 
-func putSingleSession(ctx context.Context, update sessionUpdate) (err error) {
+func putSingleSession(ctx context.Context, update sessionPut) (err error) {
 	update.sqlStore.mutex.Lock()
 	defer update.sqlStore.mutex.Unlock()
-	sessionsLock.Lock(update.sqlStore.JID)
-	defer sessionsLock.Unlock(update.sqlStore.JID)
 	if update.sqlStore.db.Dialect == dbutil.MSSQL {
 		_, err = update.sqlStore.db.Exec(ctx, mssqlPutSessionQuery, update.sqlStore.JID, update.address, update.session)
 	} else {
@@ -240,13 +270,152 @@ func putSingleSession(ctx context.Context, update sessionUpdate) (err error) {
 	return err
 }
 
-func deleteSingleSession(ctx context.Context, update sessionUpdate) (err error) {
+func deleteSingleSession(ctx context.Context, update sessionDelete) (err error) {
 	update.sqlStore.mutex.Lock()
 	defer update.sqlStore.mutex.Unlock()
-	sessionsLock.Lock(update.sqlStore.JID)
-	defer sessionsLock.Unlock(update.sqlStore.JID)
 	_, err = update.sqlStore.db.Exec(ctx, deleteSessionQuery, update.sqlStore.JID, update.address)
 	return err
+}
+
+func migratePNToLIDSingleSession(ctx context.Context, update sessionMigratePnToLID) (err error) {
+	pnSignal := update.pn.SignalAddressUser()
+	if !update.sqlStore.migratedPNSessionsCache.Add(pnSignal) {
+		return nil
+	}
+	var sessionsUpdated, identityKeysUpdated, senderKeysUpdated int64
+	lidSignal := update.lid.SignalAddressUser()
+	err = update.sqlStore.db.DoTxn(ctx, nil, func(ctx context.Context) error {
+		var res sql.Result
+		var err error
+		if update.sqlStore.db.Dialect == dbutil.MSSQL {
+			res, err = update.sqlStore.db.Exec(ctx, mssqlMigratePNToLIDSessionsQuery, update.sqlStore.JID, pnSignal, lidSignal)
+		} else {
+			res, err = update.sqlStore.db.Exec(ctx, sqliteMigratePNToLIDSessionsQuery, update.sqlStore.JID, pnSignal, lidSignal)
+		}
+		if err != nil {
+			return fmt.Errorf("failed to migrate sessions: %w", err)
+		}
+		sessionsUpdated, err = res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("failed to get rows affected for sessions: %w", err)
+		}
+		err = update.sqlStore.deleteAllSessions(ctx, pnSignal)
+		if err != nil {
+			return fmt.Errorf("failed to delete extra sessions: %w", err)
+		}
+		if update.sqlStore.db.Dialect == dbutil.MSSQL {
+			res, err = update.sqlStore.db.Exec(ctx, mssqlMigratePNToLIDSenderKeysQuery, update.sqlStore.JID, pnSignal, lidSignal)
+		} else {
+			res, err = update.sqlStore.db.Exec(ctx, sqliteMigratePNToLIDSenderKeysQuery, update.sqlStore.JID, pnSignal, lidSignal)
+		}
+		if err != nil {
+			return fmt.Errorf("failed to migrate sender keys: %w", err)
+		}
+		senderKeysUpdated, err = res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("failed to get rows affected for sender keys: %w", err)
+		}
+		err = update.sqlStore.deleteAllSenderKeys(ctx, pnSignal)
+		if err != nil {
+			return fmt.Errorf("failed to delete extra sender keys: %w", err)
+		}
+		if update.sqlStore.db.Dialect == dbutil.MSSQL {
+			res, err = update.sqlStore.db.Exec(ctx, mssqlMigratePNToLIDIdentityKeysQuery, update.sqlStore.JID, pnSignal, lidSignal)
+			if err != nil {
+				return fmt.Errorf("failed to migrate identity keys: %w", err)
+			}
+		} else {
+			res, err = update.sqlStore.db.Exec(ctx, sqliteMigratePNToLIDIdentityKeysQuery, update.sqlStore.JID, pnSignal, lidSignal)
+			if err != nil {
+				return fmt.Errorf("failed to migrate identity keys: %w", err)
+			}
+		}
+
+		identityKeysUpdated, err = res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("failed to get rows affected for identity keys: %w", err)
+		}
+		err = update.sqlStore.deleteAllIdentityKeys(ctx, pnSignal)
+		if err != nil {
+			return fmt.Errorf("failed to delete extra identity keys: %w", err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if sessionsUpdated > 0 || senderKeysUpdated > 0 || identityKeysUpdated > 0 {
+		update.sqlStore.log.Infof("Migrated %d sessions, %d identity keys and %d sender keys from %s to %s", sessionsUpdated, identityKeysUpdated, senderKeysUpdated, pnSignal, lidSignal)
+	} else {
+		update.sqlStore.log.Debugf("No sessions or sender keys found to migrate from %s to %s", pnSignal, lidSignal)
+	}
+	return nil
+}
+
+func storeSessionsFromChan(ctx context.Context, update sessionBulkInsert) error {
+	update.sqlStore.db.DoTxn(ctx, nil, func(ctx context.Context) error {
+		if len(update.oldAddresses) > 0 {
+			query := removeSessionsQuery + "("
+			queryParams := make([]interface{}, len(update.oldAddresses)+1)
+			queryParams[0] = update.sqlStore.JID
+			for index, address := range update.oldAddresses {
+				if index > 0 {
+					query += ","
+				}
+				query += fmt.Sprintf("@p%d", index+2)
+				queryParams[index+1] = address
+			}
+			query += ")"
+			_, err := update.sqlStore.db.Exec(ctx, query, queryParams...)
+			if err != nil {
+				update.sqlStore.log.Errorf("Could not Remove Sessions: " + err.Error())
+				return err
+			}
+		}
+		dt := time.Now()
+		_, err := update.sqlStore.db.Exec(ctx, fmt.Sprintf(`CREATE TABLE staging_sessions_%d (
+			our_jid   VARCHAR(300),
+			their_id  VARCHAR(300),
+			session  VARBINARY(max),
+		)`, dt.UnixMilli()))
+		if err != nil {
+			return fmt.Errorf("failed to create table: %w", err)
+		}
+		bulkImportStr := mssql.CopyIn(fmt.Sprintf("staging_sessions_%d", dt.UnixMilli()), mssql.BulkOptions{}, "our_jid", "their_id", "session")
+		stmt, err := update.sqlStore.db.PrepareContext(ctx, bulkImportStr)
+		if err != nil {
+			update.sqlStore.log.Errorf("Could not Prepare Statement: " + err.Error())
+			return err
+		}
+		for address, session := range update.sessions {
+			stmt.Exec(update.sqlStore.JID, address, session[:])
+		}
+		_, err = stmt.Exec()
+		if err != nil {
+			update.sqlStore.log.Errorf("Could not Store Sessions: " + err.Error())
+			return err
+		}
+		_, err = update.sqlStore.db.Exec(ctx, fmt.Sprintf(`MERGE INTO whatsmeow_sessions AS target 
+			USING staging_sessions_%d AS source 
+			ON target.our_jid = source.our_jid AND target.their_id = source.their_id
+			WHEN MATCHED THEN
+				UPDATE SET target.session = source.session 
+			WHEN NOT MATCHED THEN 
+				INSERT (our_jid, their_id, session) 
+				VALUES (source.our_jid, source.their_id, source.session);`, dt.UnixMilli()))
+		if err != nil {
+			update.sqlStore.log.Errorf("failed to merge bulk: " + err.Error())
+			return fmt.Errorf("failed to merge bulk: %w", err)
+		}
+		_, err = update.sqlStore.db.Exec(ctx, fmt.Sprintf("DROP TABLE staging_sessions_%d", dt.UnixMilli()))
+		if err != nil {
+			update.sqlStore.log.Errorf("failed to drop table: " + err.Error())
+			return fmt.Errorf("failed to drop table: %w", err)
+		}
+		return nil
+	})
+	return nil
 }
 
 func ManageIdentities(ctx context.Context, logger waLog.Logger) {
@@ -492,19 +661,20 @@ func (s *SQLStore) HasSession(ctx context.Context, address string) (has bool, er
 }
 
 func (s *SQLStore) PutSession(ctx context.Context, address string, session []byte) error {
-	sessionChannel <- sessionUpdate{
+	sessionChannel <- sessionPut{
 		sqlStore: s,
 		address:  address,
 		session:  session,
-		isAdd:    true,
 	}
 	return nil
 }
 
 func (s *SQLStore) DeleteAllSessions(ctx context.Context, phone string) error {
-	sessionsLock.Lock(s.JID)
-	defer sessionsLock.Unlock(s.JID)
-	return s.deleteAllSessions(ctx, phone)
+	sessionChannel <- sessionDeleteAll{
+		sqlStore: s,
+		phone:    phone,
+	}
+	return nil
 }
 
 func (s *SQLStore) deleteAllSessions(ctx context.Context, phone string) error {
@@ -531,88 +701,18 @@ func (s *SQLStore) deleteAllIdentityKeys(ctx context.Context, phone string) erro
 }
 
 func (s *SQLStore) DeleteSession(ctx context.Context, address string) error {
-	sessionChannel <- sessionUpdate{
+	sessionChannel <- sessionDelete{
 		sqlStore: s,
 		address:  address,
-		isAdd:    false,
 	}
 	return nil
 }
 
 func (s *SQLStore) MigratePNToLID(ctx context.Context, pn, lid types.JID) error {
-	pnSignal := pn.SignalAddressUser()
-	if !s.migratedPNSessionsCache.Add(pnSignal) {
-		return nil
-	}
-	var sessionsUpdated, identityKeysUpdated, senderKeysUpdated int64
-	lidSignal := lid.SignalAddressUser()
-	sessionsLock.Lock(s.JID)
-	defer sessionsLock.Unlock(s.JID)
-	err := s.db.DoTxn(ctx, nil, func(ctx context.Context) error {
-		var res sql.Result
-		var err error
-		if s.db.Dialect == dbutil.MSSQL {
-			res, err = s.db.Exec(ctx, mssqlMigratePNToLIDSessionsQuery, s.JID, pnSignal, lidSignal)
-		} else {
-			res, err = s.db.Exec(ctx, sqliteMigratePNToLIDSessionsQuery, s.JID, pnSignal, lidSignal)
-		}
-		if err != nil {
-			return fmt.Errorf("failed to migrate sessions: %w", err)
-		}
-		sessionsUpdated, err = res.RowsAffected()
-		if err != nil {
-			return fmt.Errorf("failed to get rows affected for sessions: %w", err)
-		}
-		err = s.deleteAllSessions(ctx, pnSignal)
-		if err != nil {
-			return fmt.Errorf("failed to delete extra sessions: %w", err)
-		}
-		if s.db.Dialect == dbutil.MSSQL {
-			res, err = s.db.Exec(ctx, mssqlMigratePNToLIDSenderKeysQuery, s.JID, pnSignal, lidSignal)
-		} else {
-			res, err = s.db.Exec(ctx, sqliteMigratePNToLIDSenderKeysQuery, s.JID, pnSignal, lidSignal)
-		}
-		if err != nil {
-			return fmt.Errorf("failed to migrate sender keys: %w", err)
-		}
-		senderKeysUpdated, err = res.RowsAffected()
-		if err != nil {
-			return fmt.Errorf("failed to get rows affected for sender keys: %w", err)
-		}
-		err = s.deleteAllSenderKeys(ctx, pnSignal)
-		if err != nil {
-			return fmt.Errorf("failed to delete extra sender keys: %w", err)
-		}
-		if s.db.Dialect == dbutil.MSSQL {
-			res, err = s.db.Exec(ctx, mssqlMigratePNToLIDIdentityKeysQuery, s.JID, pnSignal, lidSignal)
-			if err != nil {
-				return fmt.Errorf("failed to migrate identity keys: %w", err)
-			}
-		} else {
-			res, err = s.db.Exec(ctx, sqliteMigratePNToLIDIdentityKeysQuery, s.JID, pnSignal, lidSignal)
-			if err != nil {
-				return fmt.Errorf("failed to migrate identity keys: %w", err)
-			}
-		}
-
-		identityKeysUpdated, err = res.RowsAffected()
-		if err != nil {
-			return fmt.Errorf("failed to get rows affected for identity keys: %w", err)
-		}
-		err = s.deleteAllIdentityKeys(ctx, pnSignal)
-		if err != nil {
-			return fmt.Errorf("failed to delete extra identity keys: %w", err)
-		}
-
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-	if sessionsUpdated > 0 || senderKeysUpdated > 0 || identityKeysUpdated > 0 {
-		s.log.Infof("Migrated %d sessions, %d identity keys and %d sender keys from %s to %s", sessionsUpdated, identityKeysUpdated, senderKeysUpdated, pnSignal, lidSignal)
-	} else {
-		s.log.Debugf("No sessions or sender keys found to migrate from %s to %s", pnSignal, lidSignal)
+	sessionChannel <- sessionMigratePnToLID{
+		sqlStore: s,
+		pn:       pn,
+		lid:      lid,
 	}
 	return nil
 }
@@ -1574,69 +1674,11 @@ func (s *SQLStore) CacheIdentities(ctx context.Context, addresses []string) (fin
 }
 
 func (s *SQLStore) StoreSessions(ctx context.Context, sessions map[string][]byte, oldAddresses []string) {
-	sessionsLock.Lock(s.JID)
-	defer sessionsLock.Unlock(s.JID)
-	s.db.DoTxn(ctx, nil, func(ctx context.Context) error {
-		if len(oldAddresses) > 0 {
-			query := removeSessionsQuery + "("
-			queryParams := make([]interface{}, len(oldAddresses)+1)
-			queryParams[0] = s.JID
-			for index, address := range oldAddresses {
-				if index > 0 {
-					query += ","
-				}
-				query += fmt.Sprintf("@p%d", index+2)
-				queryParams[index+1] = address
-			}
-			query += ")"
-			_, err := s.db.Exec(ctx, query, queryParams...)
-			if err != nil {
-				s.log.Errorf("Could not Remove Sessions: " + err.Error())
-				return err
-			}
-		}
-		dt := time.Now()
-		_, err := s.db.Exec(ctx, fmt.Sprintf(`CREATE TABLE staging_sessions_%d (
-			our_jid   VARCHAR(300),
-			their_id  VARCHAR(300),
-			session  VARBINARY(max),
-		)`, dt.UnixMilli()))
-		if err != nil {
-			return fmt.Errorf("failed to create table: %w", err)
-		}
-		bulkImportStr := mssql.CopyIn(fmt.Sprintf("staging_sessions_%d", dt.UnixMilli()), mssql.BulkOptions{}, "our_jid", "their_id", "session")
-		stmt, err := s.db.PrepareContext(ctx, bulkImportStr)
-		if err != nil {
-			s.log.Errorf("Could not Prepare Statement: " + err.Error())
-			return err
-		}
-		for address, session := range sessions {
-			stmt.Exec(s.JID, address, session[:])
-		}
-		_, err = stmt.Exec()
-		if err != nil {
-			s.log.Errorf("Could not Store Sessions: " + err.Error())
-			return err
-		}
-		_, err = s.db.Exec(ctx, fmt.Sprintf(`MERGE INTO whatsmeow_sessions AS target 
-			USING staging_sessions_%d AS source 
-			ON target.our_jid = source.our_jid AND target.their_id = source.their_id
-			WHEN MATCHED THEN
-				UPDATE SET target.session = source.session 
-			WHEN NOT MATCHED THEN 
-				INSERT (our_jid, their_id, session) 
-				VALUES (source.our_jid, source.their_id, source.session);`, dt.UnixMilli()))
-		if err != nil {
-			s.log.Errorf("failed to merge bulk: " + err.Error())
-			return fmt.Errorf("failed to merge bulk: %w", err)
-		}
-		_, err = s.db.Exec(ctx, fmt.Sprintf("DROP TABLE staging_sessions_%d", dt.UnixMilli()))
-		if err != nil {
-			s.log.Errorf("failed to drop table: " + err.Error())
-			return fmt.Errorf("failed to drop table: %w", err)
-		}
-		return nil
-	})
+	sessionChannel <- sessionBulkInsert{
+		sqlStore:     s,
+		sessions:     sessions,
+		oldAddresses: oldAddresses,
+	}
 }
 
 func (s *SQLStore) StoreIdentities(ctx context.Context, identityKeys map[string][32]byte, oldAddresses []string) {
