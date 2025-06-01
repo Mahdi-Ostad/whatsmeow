@@ -55,6 +55,8 @@ type SQLStore struct {
 	migratedPNSessionsCache *exsync.Set[string]
 }
 
+var sessionsLock = exsync.NewLockMap[string]()
+
 type contactUpdate struct {
 	sqlStore *SQLStore
 	contacts []store.ContactEntry
@@ -228,6 +230,8 @@ func ManageSessions(ctx context.Context, logger waLog.Logger) {
 func putSingleSession(ctx context.Context, update sessionUpdate) (err error) {
 	update.sqlStore.mutex.Lock()
 	defer update.sqlStore.mutex.Unlock()
+	sessionsLock.Lock(update.sqlStore.JID)
+	defer sessionsLock.Unlock(update.sqlStore.JID)
 	if update.sqlStore.db.Dialect == dbutil.MSSQL {
 		_, err = update.sqlStore.db.Exec(ctx, mssqlPutSessionQuery, update.sqlStore.JID, update.address, update.session)
 	} else {
@@ -239,6 +243,8 @@ func putSingleSession(ctx context.Context, update sessionUpdate) (err error) {
 func deleteSingleSession(ctx context.Context, update sessionUpdate) (err error) {
 	update.sqlStore.mutex.Lock()
 	defer update.sqlStore.mutex.Unlock()
+	sessionsLock.Lock(update.sqlStore.JID)
+	defer sessionsLock.Unlock(update.sqlStore.JID)
 	_, err = update.sqlStore.db.Exec(ctx, deleteSessionQuery, update.sqlStore.JID, update.address)
 	return err
 }
@@ -500,6 +506,8 @@ func (s *SQLStore) DeleteAllSessions(ctx context.Context, phone string) error {
 }
 
 func (s *SQLStore) deleteAllSessions(ctx context.Context, phone string) error {
+	sessionsLock.Lock(s.JID)
+	defer sessionsLock.Unlock(s.JID)
 	_, err := s.db.Exec(ctx, deleteAllSessionsQuery, s.JID, phone+":%")
 	return err
 }
@@ -538,6 +546,8 @@ func (s *SQLStore) MigratePNToLID(ctx context.Context, pn, lid types.JID) error 
 	}
 	var sessionsUpdated, identityKeysUpdated, senderKeysUpdated int64
 	lidSignal := lid.SignalAddressUser()
+	sessionsLock.Lock(s.JID)
+	defer sessionsLock.Unlock(s.JID)
 	err := s.db.DoTxn(ctx, nil, func(ctx context.Context) error {
 		var res sql.Result
 		var err error
@@ -1564,6 +1574,8 @@ func (s *SQLStore) CacheIdentities(ctx context.Context, addresses []string) (fin
 }
 
 func (s *SQLStore) StoreSessions(ctx context.Context, sessions map[string][]byte, oldAddresses []string) {
+	sessionsLock.Lock(s.JID)
+	defer sessionsLock.Unlock(s.JID)
 	s.db.DoTxn(ctx, nil, func(ctx context.Context) error {
 		if len(oldAddresses) > 0 {
 			query := removeSessionsQuery + "("
