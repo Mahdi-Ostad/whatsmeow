@@ -502,12 +502,12 @@ func (s *SQLStore) PutSession(ctx context.Context, address string, session []byt
 }
 
 func (s *SQLStore) DeleteAllSessions(ctx context.Context, phone string) error {
+	sessionsLock.Lock(s.JID)
+	defer sessionsLock.Unlock(s.JID)
 	return s.deleteAllSessions(ctx, phone)
 }
 
 func (s *SQLStore) deleteAllSessions(ctx context.Context, phone string) error {
-	sessionsLock.Lock(s.JID)
-	defer sessionsLock.Unlock(s.JID)
 	_, err := s.db.Exec(ctx, deleteAllSessionsQuery, s.JID, phone+":%")
 	return err
 }
