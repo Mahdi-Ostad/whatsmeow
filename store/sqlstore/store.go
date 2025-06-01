@@ -1765,7 +1765,7 @@ func (s *SQLStore) DeleteMessageNode(ctx context.Context, ref int) (err error) {
 	return err
 }
 func (s *SQLStore) DeleteOldMessageNodes(ctx context.Context) (err error) {
-	_, err = s.db.Exec(ctx, removeOldMessageNodeQuery, time.Now().Add(-14*24*time.Hour).UnixMilli())
+	_, err = s.db.Exec(ctx, removeOldMessageNodeQuery, time.Now().Add(-4*24*time.Hour).UnixMilli())
 	return err
 }
 
