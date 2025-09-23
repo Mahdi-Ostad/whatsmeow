@@ -1186,8 +1186,10 @@ func (cli *Client) encryptMessageForDevices(
 	for _, jid := range allDevices {
 		addresses = append(addresses, jid.SignalAddress().String())
 	}
+	start := time.Now().UnixMilli()
 	cli.Store.SessionsCache = cli.Store.PrekeysCache.CacheSessions(ctx, addresses)
 	cli.Store.IdentityCache = cli.Store.PrekeysCache.CacheIdentities(ctx, addresses)
+	mid := time.Now().UnixMilli()
 	for _, jid := range allDevices {
 		plaintext := msgPlaintext
 		if (jid.User == ownJID.User || jid.User == ownLID.User) && dsmPlaintext != nil {
@@ -1225,13 +1227,18 @@ func (cli *Client) encryptMessageForDevices(
 			includeIdentity = true
 		}
 	}
+	afterMid := time.Now().UnixMilli()
 	oldSessions := make([]string, len(cli.Store.SessionsCache))
 	oldIdentityKeys := make([]string, len(cli.Store.IdentityCache))
+	index := 0
 	for key, _ := range cli.Store.SessionsCache {
-		oldSessions = append(oldSessions, key)
+		oldSessions[index] = key
+		index++
 	}
+	index = 0
 	for key, _ := range cli.Store.IdentityCache {
-		oldIdentityKeys = append(oldIdentityKeys, key)
+		oldIdentityKeys[index] = key
+		index++
 	}
 	if len(retryDevices) > 0 {
 		cli.Store.SessionsCache["dummy"] = []byte{}
@@ -1267,6 +1274,7 @@ func (cli *Client) encryptMessageForDevices(
 		delete(cli.Store.SessionsCache, "dummy")
 		delete(cli.Store.IdentityCache, "dummy")
 	}
+	afterRetry := time.Now().UnixMilli()
 	if len(cli.Store.IdentityCache) > 0 {
 		cli.Store.PrekeysCache.StoreIdentities(ctx, cli.Store.IdentityCache, oldIdentityKeys)
 	}
@@ -1275,8 +1283,10 @@ func (cli *Client) encryptMessageForDevices(
 	}
 	clear(cli.Store.SessionsCache)
 	clear(cli.Store.IdentityCache)
-	oldSessions = make([]string, 0)
-	oldIdentityKeys = make([]string, 0)
+	end := time.Now().UnixMilli()
+	if end-start >= 1000 {
+		cli.Log.Infof("*****PeerEncrypt: Total: %d, StoreTime: %d, RetryTime: %d, DeviceTime: %d, CacheTime: %d", end-start, end-afterRetry, afterRetry-afterMid, afterMid-mid, mid-start)
+	}
 	return participantNodes, includeIdentity
 }
 
