@@ -20,6 +20,7 @@ import (
 
 	mssql "github.com/denisenkom/go-mssqldb"
 	"go.mau.fi/util/dbutil"
+	"go.mau.fi/util/exslices"
 	"go.mau.fi/util/exsync"
 	waBinary "go.mau.fi/whatsmeow/binary"
 
@@ -1117,6 +1118,21 @@ const (
 		VALUES %s
 		ON CONFLICT (our_jid, their_jid) DO UPDATE SET first_name=excluded.first_name, full_name=excluded.full_name
 	`
+	sqlitePutRedactedPhoneQuery = `
+		INSERT INTO whatsmeow_contacts (our_jid, their_jid, redacted_phone)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (our_jid, their_jid) DO UPDATE SET redacted_phone=excluded.redacted_phone
+	`
+	mssqlPutRedactedPhoneQuery = `
+		MERGE INTO whatsmeow_contacts AS target
+		USING (VALUES (@p1, @p2, @p3)) AS source (our_jid, their_jid, redacted_phone)
+		ON (target.our_jid = source.our_jid AND target.their_jid = source.their_jid)
+		WHEN MATCHED THEN
+			UPDATE SET target.redacted_phone = source.redacted_phone
+		WHEN NOT MATCHED THEN
+			INSERT (our_jid, their_jid, redacted_phone)
+			VALUES (source.our_jid, source.their_jid, source.redacted_phone);
+	`
 	mssqlPutManyContactNamesQuery = `
 		MERGE INTO whatsmeow_contacts AS target
 		USING (VALUES %s) AS source (our_jid, their_jid, first_name, full_name)
@@ -1156,11 +1172,19 @@ const (
 			VALUES (source.our_jid, source.their_jid, source.business_name);
 	`
 	getContactQuery = `
-		SELECT first_name, full_name, push_name, business_name FROM whatsmeow_contacts WITH (NOLOCK) WHERE our_jid=@p1 AND their_jid=@p2
+		SELECT first_name, full_name, push_name, business_name, redacted_phone FROM whatsmeow_contacts WITH (NOLOCK) WHERE our_jid=@p1 AND their_jid=@p2
 	`
 	getAllContactsQuery = `
-		SELECT their_jid, first_name, full_name, push_name, business_name FROM whatsmeow_contacts WITH (NOLOCK) WHERE our_jid=@p1
+		SELECT their_jid, first_name, full_name, push_name, business_name, redacted_phone FROM whatsmeow_contacts WITH (NOLOCK) WHERE our_jid=@p1
 	`
+)
+
+var putContactNamesMassInsertBuilder = dbutil.NewMassInsertBuilder[store.ContactEntry, [1]any](
+	putContactNameQuery, "($1, $%d, $%d, $%d)",
+)
+
+var putRedactedPhonesMassInsertBuilder = dbutil.NewMassInsertBuilder[store.RedactedPhoneEntry, [1]any](
+	putRedactedPhoneQuery, "($1, $%d, $%d)",
 )
 
 func (s *SQLStore) PutPushName(ctx context.Context, user types.JID, pushName string) (bool, string, error) {
@@ -1239,46 +1263,69 @@ func (s *SQLStore) PutContactName(ctx context.Context, user types.JID, firstName
 
 const contactBatchSize = 300
 
-func (s *SQLStore) putContactNamesBatch(ctx context.Context, contacts []store.ContactEntry) error {
-	values := make([]any, 1, 1+len(contacts)*3)
-	queryParts := make([]string, 0, len(contacts))
-	values[0] = s.JID
-	placeholderSyntax := "(@p1, @p%d, @p%d, @p%d)"
-	if s.db.Dialect == dbutil.SQLite {
-		placeholderSyntax = "(?1, ?%d, ?%d, ?%d)"
+func (s *SQLStore) PutAllContactNames(ctx context.Context, contacts []store.ContactEntry) error {
+	if len(contacts) == 0 {
+		return nil
 	}
-	i := 0
-	handledContacts := make(map[types.JID]struct{}, len(contacts))
-	for _, contact := range contacts {
-		if contact.JID.IsEmpty() {
-			s.log.Warnf("Empty contact info in mass insert: %+v", contact)
-			continue
-		}
-		// The whole query will break if there are duplicates, so make sure there aren't any duplicates
-		_, alreadyHandled := handledContacts[contact.JID]
-		if alreadyHandled {
-			s.log.Warnf("Duplicate contact info for %s in mass insert", contact.JID)
-			continue
-		}
-		handledContacts[contact.JID] = struct{}{}
-		baseIndex := i*3 + 1
-		values = append(values, contact.JID.String(), contact.FirstName, contact.FullName)
-		queryParts = append(queryParts, fmt.Sprintf(placeholderSyntax, baseIndex+1, baseIndex+2, baseIndex+3))
-		i++
+	origLen := len(contacts)
+	contacts = exslices.DeduplicateUnsortedOverwriteFunc(contacts, func(t store.ContactEntry) types.JID {
+		return t.JID
+	})
+	if origLen != len(contacts) {
+		s.log.Warnf("%d duplicate contacts found in PutAllContactNames", origLen-len(contacts))
 	}
-	if s.db.Dialect == dbutil.MSSQL {
-		_, err := s.db.Exec(ctx, fmt.Sprintf(mssqlPutManyContactNamesQuery, strings.Join(queryParts, ",")), values...)
+	err := s.db.DoTxn(ctx, nil, func(ctx context.Context) error {
+		for slice := range slices.Chunk(contacts, contactBatchSize) {
+			query, vars := putContactNamesMassInsertBuilder.Build([1]any{s.JID}, slice)
+			_, err := s.db.Exec(ctx, query, vars...)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
 		return err
 	}
-	_, err := s.db.Exec(ctx, fmt.Sprintf(sqlitePutManyContactNamesQuery, strings.Join(queryParts, ",")), values...)
-	return err
+	s.contactCacheLock.Lock()
+	// Just clear the cache, fetching pushnames and business names would be too much effort
+	s.contactCache = make(map[types.JID]*types.ContactInfo)
+	s.contactCacheLock.Unlock()
+	return nil
 }
 
-func (s *SQLStore) PutAllContactNames(ctx context.Context, contacts []store.ContactEntry) error {
-	contactsChannel <- contactUpdate{
-		sqlStore: s,
-		contacts: contacts,
+func (s *SQLStore) PutManyRedactedPhones(ctx context.Context, entries []store.RedactedPhoneEntry) error {
+	if len(entries) == 0 {
+		return nil
 	}
+	origLen := len(entries)
+	entries = exslices.DeduplicateUnsortedOverwriteFunc(entries, func(t store.RedactedPhoneEntry) types.JID {
+		return t.JID
+	})
+	if origLen != len(entries) {
+		s.log.Warnf("%d duplicate contacts found in PutManyRedactedPhones", origLen-len(entries))
+	}
+	err := s.db.DoTxn(ctx, nil, func(ctx context.Context) error {
+		for slice := range slices.Chunk(entries, contactBatchSize) {
+			query, vars := putRedactedPhonesMassInsertBuilder.Build([1]any{s.JID}, slice)
+			_, err := s.db.Exec(ctx, query, vars...)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	s.contactCacheLock.Lock()
+	for _, entry := range entries {
+		if cached, ok := s.contactCache[entry.JID]; ok && cached.RedactedPhone == entry.RedactedPhone {
+			continue
+		}
+		delete(s.contactCache, entry.JID)
+	}
+	s.contactCacheLock.Unlock()
 	return nil
 }
 
@@ -1288,17 +1335,18 @@ func (s *SQLStore) getContact(ctx context.Context, user types.JID) (*types.Conta
 		return cached, nil
 	}
 
-	var first, full, push, business sql.NullString
-	err := s.db.QueryRow(ctx, getContactQuery, s.JID, user).Scan(&first, &full, &push, &business)
+	var first, full, push, business, redactedPhone sql.NullString
+	err := s.db.QueryRow(ctx, getContactQuery, s.JID, user).Scan(&first, &full, &push, &business, &redactedPhone)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
 	info := &types.ContactInfo{
-		Found:        err == nil,
-		FirstName:    first.String,
-		FullName:     full.String,
-		PushName:     push.String,
-		BusinessName: business.String,
+		Found:         err == nil,
+		FirstName:     first.String,
+		FullName:      full.String,
+		PushName:      push.String,
+		BusinessName:  business.String,
+		RedactedPhone: redactedPhone.String,
 	}
 	s.contactCache[user] = info
 	return info, nil
@@ -1324,17 +1372,18 @@ func (s *SQLStore) GetAllContacts(ctx context.Context) (map[types.JID]types.Cont
 	output := make(map[types.JID]types.ContactInfo, len(s.contactCache))
 	for rows.Next() {
 		var jid types.JID
-		var first, full, push, business sql.NullString
-		err = rows.Scan(&jid, &first, &full, &push, &business)
+		var first, full, push, business, redactedPhone sql.NullString
+		err = rows.Scan(&jid, &first, &full, &push, &business, &redactedPhone)
 		if err != nil {
 			return nil, fmt.Errorf("error scanning row: %w", err)
 		}
 		info := types.ContactInfo{
-			Found:        true,
-			FirstName:    first.String,
-			FullName:     full.String,
-			PushName:     push.String,
-			BusinessName: business.String,
+			Found:         true,
+			FirstName:     first.String,
+			FullName:      full.String,
+			PushName:      push.String,
+			BusinessName:  business.String,
+			RedactedPhone: redactedPhone.String,
 		}
 		output[jid] = info
 		s.contactCache[jid] = &info
@@ -1364,7 +1413,9 @@ const (
 
 func (s *SQLStore) PutMutedUntil(ctx context.Context, chat types.JID, mutedUntil time.Time) error {
 	var val int64
-	if !mutedUntil.IsZero() {
+	if mutedUntil == store.MutedForever {
+		val = -1
+	} else if !mutedUntil.IsZero() {
 		val = mutedUntil.Unix()
 	}
 	s.mutex.Lock()
@@ -1409,7 +1460,9 @@ func (s *SQLStore) GetChatSettings(ctx context.Context, chat types.JID) (setting
 	} else {
 		settings.Found = true
 	}
-	if mutedUntil != 0 {
+	if mutedUntil < 0 {
+		settings.MutedUntil = store.MutedForever
+	} else if mutedUntil > 0 {
 		settings.MutedUntil = time.Unix(mutedUntil, 0)
 	}
 	return
@@ -1434,7 +1487,23 @@ const (
 		);
 	`
 	sqliteGetMsgSecret = `
-		SELECT key FROM whatsmeow_message_secrets WHERE our_jid=@p1 AND chat_jid=@p2 AND sender_jid=@p3 AND message_id=@p4
+		SELECT key, sender_jid
+		FROM whatsmeow_message_secrets
+		WHERE our_jid=$1 AND (chat_jid=$2 OR chat_jid=(
+			CASE
+				WHEN $2 LIKE '%@lid'
+					THEN (SELECT pn || '@s.whatsapp.net' FROM whatsmeow_lid_map WHERE lid=replace($2, '@lid', ''))
+				WHEN $2 LIKE '%@s.whatsapp.net'
+					THEN (SELECT lid || '@lid' FROM whatsmeow_lid_map WHERE lid=replace($2, '@s.whatsapp.net', ''))
+			END
+		)) AND message_id=$4 AND (sender_jid=$3 OR sender_jid=(
+			CASE
+				WHEN $3 LIKE '%@lid'
+					THEN (SELECT pn || '@s.whatsapp.net' FROM whatsmeow_lid_map WHERE lid=replace($3, '@lid', ''))
+				WHEN $3 LIKE '%@s.whatsapp.net'
+					THEN (SELECT lid || '@lid' FROM whatsmeow_lid_map WHERE lid=replace($3, '@s.whatsapp.net', ''))
+			END
+		))
 	`
 	mssqlGetMsgSecret = `
 		SELECT key_info FROM whatsmeow_message_secrets WITH (NOLOCK) WHERE our_jid=@p1 AND chat_jid=@p2 AND sender_jid=@p3 AND message_id=@p4
@@ -1499,11 +1568,11 @@ func (s *SQLStore) PutMessageSecret(ctx context.Context, chat, sender types.JID,
 	return nil
 }
 
-func (s *SQLStore) GetMessageSecret(ctx context.Context, chat, sender types.JID, id types.MessageID) (secret []byte, err error) {
+func (s *SQLStore) GetMessageSecret(ctx context.Context, chat, sender types.JID, id types.MessageID) (secret []byte, realSender types.JID, err error) {
 	if s.db.Dialect == dbutil.MSSQL {
-		err = s.db.QueryRow(ctx, mssqlGetMsgSecret, s.JID, chat.ToNonAD(), sender.ToNonAD(), id).Scan(&secret)
+		err = s.db.QueryRow(ctx, mssqlGetMsgSecret, s.JID, chat.ToNonAD(), sender.ToNonAD(), id).Scan(&secret, &realSender)
 	} else {
-		err = s.db.QueryRow(ctx, sqliteGetMsgSecret, s.JID, chat.ToNonAD(), sender.ToNonAD(), id).Scan(&secret)
+		err = s.db.QueryRow(ctx, sqliteGetMsgSecret, s.JID, chat.ToNonAD(), sender.ToNonAD(), id).Scan(&secret, &realSender)
 	}
 	if errors.Is(err, sql.ErrNoRows) {
 		err = nil
