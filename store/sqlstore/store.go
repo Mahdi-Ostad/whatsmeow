@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -59,6 +60,11 @@ type SQLStore struct {
 type contactUpdate struct {
 	sqlStore *SQLStore
 	contacts []store.ContactEntry
+}
+
+type contactRedactedPhoneUpdate struct {
+	sqlStore       *SQLStore
+	redactedPhones []store.RedactedPhoneEntry
 }
 
 type senderkeyUpdate struct {
@@ -117,7 +123,7 @@ type putMessageSecretUpdate struct {
 }
 
 var sqlInstance *RetryDB
-var contactsChannel = make(chan contactUpdate, 1000)
+var contactsChannel = make(chan interface{}, 10000)
 var senderkeysChannel = make(chan senderkeyUpdate, 1000)
 var sessionChannel = make(chan interface{}, 10000)
 var identityChannel = make(chan identityUpdate, 1000)
@@ -152,19 +158,44 @@ func ManageContacts(ctx context.Context, logger waLog.Logger) {
 			}
 		}
 	}()
-	for contactUpdate := range contactsChannel {
-		err := bulkInsertContacts(ctx, contactUpdate)
+	for update := range contactsChannel {
+		var err error
+		messageType := ""
+		switch u := update.(type) {
+		case contactUpdate:
+			if u.sqlStore.db.Dialect == dbutil.MSSQL {
+				err = bulkInsertContacts(ctx, u)
+			} else {
+				err = massInsertContacts(ctx, u, logger)
+			}
+			messageType = "Update Contact"
+			u.sqlStore.contactCacheLock.Lock()
+			// Just clear the cache, fetching pushnames and business names would be too much effort
+			// I'll do it myself then F U XD
+			for _, updates := range u.contacts {
+				delete(u.sqlStore.contactCache, updates.JID)
+			}
+			u.sqlStore.contactCacheLock.Unlock()
+		case contactRedactedPhoneUpdate:
+			if u.sqlStore.db.Dialect == dbutil.MSSQL {
+				err = bulkInsertRedactedPhones(ctx, u)
+			} else {
+				err = massInsertRedactedPhones(ctx, u, logger)
+			}
+			messageType = "Update Contact"
+		}
 		if err != nil {
-			logger.Errorf("Could Not Insert Contacts: %s", err.Error())
+			logger.Errorf("Could Not Update Session %s: %s", messageType, err.Error())
 		}
-		contactUpdate.sqlStore.contactCacheLock.Lock()
-		// Just clear the cache, fetching pushnames and business names would be too much effort
-		// I'll do it myself then F U XD
-		for _, updates := range contactUpdate.contacts {
-			delete(contactUpdate.sqlStore.contactCache, updates.JID)
-		}
-		contactUpdate.sqlStore.contactCacheLock.Unlock()
 	}
+}
+
+func (s *SQLStore) PutAllContactNames(ctx context.Context, contacts []store.ContactEntry) error {
+	contactsChannel <- contactUpdate{
+		sqlStore: s,
+		contacts: contacts,
+	}
+	return nil
 }
 
 func bulkInsertContacts(ctx context.Context, update contactUpdate) error {
@@ -211,6 +242,117 @@ func bulkInsertContacts(ctx context.Context, update contactUpdate) error {
 		}
 		return nil
 	})
+}
+
+func massInsertContacts(ctx context.Context, update contactUpdate, logger waLog.Logger) error {
+	if len(update.contacts) == 0 {
+		return nil
+	}
+	origLen := len(update.contacts)
+	update.contacts = exslices.DeduplicateUnsortedOverwriteFunc(update.contacts, func(t store.ContactEntry) types.JID {
+		return t.JID
+	})
+	if origLen != len(update.contacts) {
+		logger.Warnf("%d duplicate contacts found in PutAllContactNames", origLen-len(update.contacts))
+	}
+	err := update.sqlStore.db.DoTxn(ctx, nil, func(ctx context.Context) error {
+		for slice := range slices.Chunk(update.contacts, contactBatchSize) {
+			query, vars := sqlitePutContactNamesMassInsertBuilder.Build([1]any{update.sqlStore.JID}, slice)
+			_, err := update.sqlStore.db.Exec(ctx, query, vars...)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	update.sqlStore.contactCacheLock.Lock()
+	// Just clear the cache, fetching pushnames and business names would be too much effort
+	update.sqlStore.contactCache = make(map[types.JID]*types.ContactInfo)
+	update.sqlStore.contactCacheLock.Unlock()
+	return nil
+}
+
+func bulkInsertRedactedPhones(ctx context.Context, update contactRedactedPhoneUpdate) error {
+	return update.sqlStore.db.DoTxn(ctx, nil, func(ctx context.Context) error {
+		dt := time.Now()
+		_, err := update.sqlStore.db.Exec(ctx, fmt.Sprintf(`CREATE TABLE staging_contacts_%d (
+			our_jid       VARCHAR(300),
+			their_jid     VARCHAR(300),
+			redacted_phone    VARCHAR(300)
+		)`, dt.UnixMilli()))
+		if err != nil {
+			return fmt.Errorf("failed to create table: %w", err)
+		}
+		bulkImportStr := mssql.CopyIn(fmt.Sprintf("staging_contacts_%d", dt.UnixMilli()), mssql.BulkOptions{}, "our_jid", "their_jid", "redacted_phone")
+		stmt, err := update.sqlStore.db.PrepareContext(ctx, bulkImportStr)
+		if err != nil {
+			return fmt.Errorf("failed to prepare bulk: %w", err)
+		}
+		for _, insert := range update.redactedPhones {
+			_, err = stmt.Exec(update.sqlStore.JID, insert.JID.String(), insert.RedactedPhone)
+			if err != nil {
+				return fmt.Errorf("failed to prepare insert: %w", err)
+			}
+		}
+		_, err = stmt.Exec()
+		if err != nil {
+			return fmt.Errorf("failed to execute bulk: %w", err)
+		}
+		_, err = update.sqlStore.db.Exec(ctx, fmt.Sprintf(`MERGE INTO whatsmeow_contacts AS target 
+		USING staging_contacts_%d AS source 
+		ON target.our_jid = source.our_jid AND target.their_jid = source.their_jid 
+		WHEN MATCHED THEN
+			UPDATE SET target.redacted_phone = source.redacted_phone
+		WHEN NOT MATCHED THEN
+			INSERT (our_jid, their_jid, redacted_phone)
+			VALUES (source.our_jid, source.their_jid, source.redacted_phone);`, dt.UnixMilli()))
+		if err != nil {
+			return fmt.Errorf("failed to merge bulk: %w", err)
+		}
+		_, err = update.sqlStore.db.Exec(ctx, fmt.Sprintf("DROP TABLE staging_contacts_%d", dt.UnixMilli()))
+		if err != nil {
+			return fmt.Errorf("failed to drop table: %w", err)
+		}
+		return nil
+	})
+}
+
+func massInsertRedactedPhones(ctx context.Context, update contactRedactedPhoneUpdate, logger waLog.Logger) error {
+	if len(update.redactedPhones) == 0 {
+		return nil
+	}
+	origLen := len(update.redactedPhones)
+	update.redactedPhones = exslices.DeduplicateUnsortedOverwriteFunc(update.redactedPhones, func(t store.RedactedPhoneEntry) types.JID {
+		return t.JID
+	})
+	if origLen != len(update.redactedPhones) {
+		logger.Warnf("%d duplicate contacts found in PutManyRedactedPhones", origLen-len(update.redactedPhones))
+	}
+	err := update.sqlStore.db.DoTxn(ctx, nil, func(ctx context.Context) error {
+		for slice := range slices.Chunk(update.redactedPhones, contactBatchSize) {
+			query, vars := sqlitePutRedactedPhonesMassInsertBuilder.Build([1]any{update.sqlStore.JID}, slice)
+			_, err := update.sqlStore.db.Exec(ctx, query, vars...)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	update.sqlStore.contactCacheLock.Lock()
+	for _, entry := range update.redactedPhones {
+		if cached, ok := update.sqlStore.contactCache[entry.JID]; ok && cached.RedactedPhone == entry.RedactedPhone {
+			continue
+		}
+		delete(update.sqlStore.contactCache, entry.JID)
+	}
+	update.sqlStore.contactCacheLock.Unlock()
+	return nil
 }
 
 func ManageSenderKeys(ctx context.Context) {
@@ -1179,12 +1321,12 @@ const (
 	`
 )
 
-var putContactNamesMassInsertBuilder = dbutil.NewMassInsertBuilder[store.ContactEntry, [1]any](
-	putContactNameQuery, "($1, $%d, $%d, $%d)",
+var sqlitePutContactNamesMassInsertBuilder = dbutil.NewMassInsertBuilder[store.ContactEntry, [1]any](
+	sqlitePutContactNameQuery, "($1, $%d, $%d, $%d)",
 )
 
-var putRedactedPhonesMassInsertBuilder = dbutil.NewMassInsertBuilder[store.RedactedPhoneEntry, [1]any](
-	putRedactedPhoneQuery, "($1, $%d, $%d)",
+var sqlitePutRedactedPhonesMassInsertBuilder = dbutil.NewMassInsertBuilder[store.RedactedPhoneEntry, [1]any](
+	sqlitePutRedactedPhoneQuery, "($1, $%d, $%d)",
 )
 
 func (s *SQLStore) PutPushName(ctx context.Context, user types.JID, pushName string) (bool, string, error) {
@@ -1263,69 +1405,11 @@ func (s *SQLStore) PutContactName(ctx context.Context, user types.JID, firstName
 
 const contactBatchSize = 300
 
-func (s *SQLStore) PutAllContactNames(ctx context.Context, contacts []store.ContactEntry) error {
-	if len(contacts) == 0 {
-		return nil
-	}
-	origLen := len(contacts)
-	contacts = exslices.DeduplicateUnsortedOverwriteFunc(contacts, func(t store.ContactEntry) types.JID {
-		return t.JID
-	})
-	if origLen != len(contacts) {
-		s.log.Warnf("%d duplicate contacts found in PutAllContactNames", origLen-len(contacts))
-	}
-	err := s.db.DoTxn(ctx, nil, func(ctx context.Context) error {
-		for slice := range slices.Chunk(contacts, contactBatchSize) {
-			query, vars := putContactNamesMassInsertBuilder.Build([1]any{s.JID}, slice)
-			_, err := s.db.Exec(ctx, query, vars...)
-			if err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-	s.contactCacheLock.Lock()
-	// Just clear the cache, fetching pushnames and business names would be too much effort
-	s.contactCache = make(map[types.JID]*types.ContactInfo)
-	s.contactCacheLock.Unlock()
-	return nil
-}
-
 func (s *SQLStore) PutManyRedactedPhones(ctx context.Context, entries []store.RedactedPhoneEntry) error {
-	if len(entries) == 0 {
-		return nil
+	contactsChannel <- contactRedactedPhoneUpdate{
+		sqlStore:       s,
+		redactedPhones: entries,
 	}
-	origLen := len(entries)
-	entries = exslices.DeduplicateUnsortedOverwriteFunc(entries, func(t store.RedactedPhoneEntry) types.JID {
-		return t.JID
-	})
-	if origLen != len(entries) {
-		s.log.Warnf("%d duplicate contacts found in PutManyRedactedPhones", origLen-len(entries))
-	}
-	err := s.db.DoTxn(ctx, nil, func(ctx context.Context) error {
-		for slice := range slices.Chunk(entries, contactBatchSize) {
-			query, vars := putRedactedPhonesMassInsertBuilder.Build([1]any{s.JID}, slice)
-			_, err := s.db.Exec(ctx, query, vars...)
-			if err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-	s.contactCacheLock.Lock()
-	for _, entry := range entries {
-		if cached, ok := s.contactCache[entry.JID]; ok && cached.RedactedPhone == entry.RedactedPhone {
-			continue
-		}
-		delete(s.contactCache, entry.JID)
-	}
-	s.contactCacheLock.Unlock()
 	return nil
 }
 

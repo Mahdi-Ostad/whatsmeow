@@ -87,9 +87,9 @@ func (cli *Client) ManualHandleEncryptedMessage(ctx context.Context, node *waBin
 			go cli.updatePushName(cli.BackgroundEventCtx, info.Sender, info, info.PushName)
 		}
 		if info.Sender.Server == types.NewsletterServer {
-			cancelled = cli.handlePlaintextMessage(ctx, info, node)
+			cli.handlePlaintextMessage(ctx, info, node)
 		} else {
-			cancelled = cli.decryptMessages(ctx, info, node)
+			cli.decryptMessages(ctx, info, node)
 		}
 	}
 }
