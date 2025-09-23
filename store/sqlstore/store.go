@@ -1242,7 +1242,7 @@ func (s *SQLStore) GetAppStateMutationMAC(ctx context.Context, name string, inde
 
 const (
 	sqlitePutContactNameQuery = `
-		INSERT INTO whatsmeow_contacts (our_jid, their_jid, first_name, full_name) VALUES (@p1, @p2, @p3, @p4)
+		INSERT INTO whatsmeow_contacts (our_jid, their_jid, first_name, full_name) VALUES ($1, $2, $3, $4)
 		ON CONFLICT (our_jid, their_jid) DO UPDATE SET first_name=excluded.first_name, full_name=excluded.full_name
 	`
 	mssqlPutContactNameQuery = `
