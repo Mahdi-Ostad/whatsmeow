@@ -355,7 +355,7 @@ const (
 	`
 	mssqlInsertDeviceQuery = `
 		MERGE INTO whatsmeow_device AS target
-		USING (VALUES (@p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8, @p9, @p10, @p11, @p12, @p13, @p14, @p15, @p16, @p17, @p18)) AS source (jid, lid, registration_id, noise_key, identity_key, signed_pre_key, signed_pre_key_id, signed_pre_key_sig, adv_key, adv_details, adv_account_sig, adv_account_sig_key, adv_device_sig, platform, business_name, push_name, facebook_uuid, manager_id)
+		USING (VALUES (@p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8, @p9, @p10, @p11, @p12, @p13, @p14, @p15, @p16, @p17, @p18, @p19)) AS source (jid, lid, registration_id, noise_key, identity_key, signed_pre_key, signed_pre_key_id, signed_pre_key_sig, adv_key, adv_details, adv_account_sig, adv_account_sig_key, adv_device_sig, platform, business_name, push_name, facebook_uuid, lid_migration_ts, manager_id)
 		ON (target.jid = source.jid)
 		WHEN MATCHED THEN
 			UPDATE SET target.lid = source.lid, target.platform = source.platform, target.business_name = source.business_name, target.push_name = source.push_name, target.lid_migration_ts = source.lid_migration_ts
