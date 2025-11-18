@@ -700,6 +700,9 @@ const (
 	sqliteHasSessionQuery = `SELECT true FROM whatsmeow_sessions WHERE our_jid=@p1 AND their_id=@p2`
 	mssqlHasSessionQuery  = `SELECT 1 FROM whatsmeow_sessions WITH (NOLOCK) WHERE our_jid=@p1 AND their_id=@p2`
 	mssqlHasDeviceManager = `SELECT 1 FROM whatsmeow_device WITH (NOLOCK) WHERE manager_id=@p1`
+	getManySessionQueryPostgres = `SELECT their_id, session FROM whatsmeow_sessions WHERE our_jid=$1 AND their_id = ANY($2)`
+	getManySessionQueryGeneric  = `SELECT their_id, session FROM whatsmeow_sessions WHERE our_jid=$1 AND their_id IN (%s)`
+	getManySessionQueryMSSQL  = `SELECT their_id, session FROM whatsmeow_sessions WHERE our_jid=@p1 AND their_id IN (%s)`
 	sqlitePutSessionQuery = `
 		INSERT INTO whatsmeow_sessions (our_jid, their_id, session) VALUES (@p1, @p2, @p3)
 		ON CONFLICT (our_jid, their_id) DO UPDATE SET session=excluded.session
@@ -801,6 +804,61 @@ func (s *SQLStore) HasSession(ctx context.Context, address string) (has bool, er
 		err = nil
 	}
 	return
+}
+
+type addressSessionTuple struct {
+	Address string
+	Session []byte
+}
+
+var sessionScanner = dbutil.ConvertRowFn[addressSessionTuple](func(row dbutil.Scannable) (out addressSessionTuple, err error) {
+	err = row.Scan(&out.Address, &out.Session)
+	return
+})
+
+func (s *SQLStore) GetManySessions(ctx context.Context, addresses []string) (map[string][]byte, error) {
+	if len(addresses) == 0 {
+		return nil, nil
+	}
+
+	var rows dbutil.Rows
+	var err error
+	if s.db.Dialect == dbutil.Postgres && PostgresArrayWrapper != nil {
+		rows, err = s.db.Query(ctx, getManySessionQueryPostgres, s.JID, PostgresArrayWrapper(addresses))
+	} else {
+		args := make([]any, len(addresses)+1)
+		placeholders := make([]string, len(addresses))
+		args[0] = s.JID
+		for i, addr := range addresses {
+			args[i+1] = addr
+			placeholders[i] = fmt.Sprintf("$%d", i+2)
+		}
+		rows, err = s.db.Query(ctx, fmt.Sprintf(getManySessionQueryGeneric, strings.Join(placeholders, ",")), args...)
+	}
+	result := make(map[string][]byte, len(addresses))
+	for _, addr := range addresses {
+		result[addr] = nil
+	}
+	err = sessionScanner.NewRowIter(rows, err).Iter(func(tuple addressSessionTuple) (bool, error) {
+		result[tuple.Address] = tuple.Session
+		return true, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (s *SQLStore) PutManySessions(ctx context.Context, sessions map[string][]byte) error {
+	return s.db.DoTxn(ctx, nil, func(ctx context.Context) error {
+		for addr, sess := range sessions {
+			err := s.PutSession(ctx, addr, sess)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func (s *SQLStore) PutSession(ctx context.Context, address string, session []byte) error {
@@ -1578,14 +1636,14 @@ const (
 				WHEN $2 LIKE '%@lid'
 					THEN (SELECT pn || '@s.whatsapp.net' FROM whatsmeow_lid_map WHERE lid=replace($2, '@lid', ''))
 				WHEN $2 LIKE '%@s.whatsapp.net'
-					THEN (SELECT lid || '@lid' FROM whatsmeow_lid_map WHERE lid=replace($2, '@s.whatsapp.net', ''))
+					THEN (SELECT lid || '@lid' FROM whatsmeow_lid_map WHERE pn=replace($2, '@s.whatsapp.net', ''))
 			END
 		)) AND message_id=$4 AND (sender_jid=$3 OR sender_jid=(
 			CASE
 				WHEN $3 LIKE '%@lid'
 					THEN (SELECT pn || '@s.whatsapp.net' FROM whatsmeow_lid_map WHERE lid=replace($3, '@lid', ''))
 				WHEN $3 LIKE '%@s.whatsapp.net'
-					THEN (SELECT lid || '@lid' FROM whatsmeow_lid_map WHERE lid=replace($3, '@s.whatsapp.net', ''))
+					THEN (SELECT lid || '@lid' FROM whatsmeow_lid_map WHERE pn=replace($3, '@s.whatsapp.net', ''))
 			END
 		))
 	`
@@ -1680,8 +1738,37 @@ const (
 			INSERT (our_jid, their_jid, token, timestamp_info)
 			VALUES (source.our_jid, source.their_jid, source.token, source.timestamp_info);
 	`
-	sqliteGetPrivacyToken = `SELECT token, timestamp FROM whatsmeow_privacy_tokens WHERE our_jid=@p1 AND their_jid=@p2`
-	mssqlGetPrivacyToken  = `SELECT token, timestamp_info FROM whatsmeow_privacy_tokens WITH (NOLOCK) WHERE our_jid=@p1 AND their_jid=@p2`
+	sqliteGetPrivacyToken = `
+		SELECT token, timestamp FROM whatsmeow_privacy_tokens WHERE our_jid=$1 AND (their_jid=$2 OR their_jid=(
+			CASE
+				WHEN $2 LIKE '%@lid'
+					THEN (SELECT pn || '@s.whatsapp.net' FROM whatsmeow_lid_map WHERE lid=replace($2, '@lid', ''))
+				WHEN $2 LIKE '%@s.whatsapp.net'
+					THEN (SELECT lid || '@lid' FROM whatsmeow_lid_map WHERE pn=replace($2, '@s.whatsapp.net', ''))
+				ELSE $2
+			END
+		))
+		ORDER BY timestamp DESC LIMIT 1
+	`
+	mssqlGetPrivacyToken  = `
+		SELECT TOP 1 token, timestamp
+		FROM whatsmeow_privacy_tokens
+		WHERE our_jid = @p1
+		  AND (their_jid = @p2 
+		       OR their_jid = 
+		          CASE 
+		              WHEN @p2 LIKE '%@lid' THEN 
+		                   (SELECT pn + '@s.whatsapp.net' 
+		                    FROM whatsmeow_lid_map 
+		                    WHERE lid = REPLACE(@p2, '@lid', ''))
+		              WHEN @p2 LIKE '%@s.whatsapp.net' THEN 
+		                   (SELECT lid + '@lid' 
+		                    FROM whatsmeow_lid_map 
+		                    WHERE pn = REPLACE(@p2, '@s.whatsapp.net', ''))
+		              ELSE @p2
+		          END
+		      )
+		ORDER BY timestamp DESC`
 )
 
 func (s *SQLStore) PutPrivacyTokens(ctx context.Context, tokens ...store.PrivacyToken) error {
