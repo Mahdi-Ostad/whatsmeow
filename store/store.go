@@ -193,10 +193,6 @@ type AllSessionSpecificStores interface {
 }
 
 type PrekeysCacheStore interface {
-	CacheSessions(ctx context.Context, addresses []string) map[string][]byte
-	CacheIdentities(ctx context.Context, addresses []string) map[string][32]byte
-	StoreSessions(ctx context.Context, sessions map[string][]byte, oldAddresses []string)
-	StoreIdentities(ctx context.Context, identityKeys map[string][32]byte, oldAddresses []string)
 	PutMessageNode(ctx context.Context, user string, group *string, node *waBinary.Node) error
 	GetMessageNodesByUser(ctx context.Context, user string) (map[int]waBinary.Node, error)
 	GetMessageNodesByGroup(ctx context.Context, group string) (map[int]waBinary.Node, error)
@@ -251,8 +247,6 @@ type Device struct {
 	Container     DeviceContainer
 	ManagerId     string
 	LockTime      int64
-	SessionsCache map[string][]byte
-	IdentityCache map[string][32]byte
 }
 
 func (device *Device) GetJID() types.JID {

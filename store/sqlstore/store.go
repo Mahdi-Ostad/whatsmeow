@@ -696,14 +696,14 @@ func (s *SQLStore) IsTrustedIdentity(ctx context.Context, address string, key [3
 }
 
 const (
-	getSessionQuery       = `SELECT session FROM whatsmeow_sessions WITH (NOLOCK) WHERE our_jid=@p1 AND their_id=@p2`
-	sqliteHasSessionQuery = `SELECT true FROM whatsmeow_sessions WHERE our_jid=@p1 AND their_id=@p2`
-	mssqlHasSessionQuery  = `SELECT 1 FROM whatsmeow_sessions WITH (NOLOCK) WHERE our_jid=@p1 AND their_id=@p2`
-	mssqlHasDeviceManager = `SELECT 1 FROM whatsmeow_device WITH (NOLOCK) WHERE manager_id=@p1`
+	getSessionQuery             = `SELECT session FROM whatsmeow_sessions WITH (NOLOCK) WHERE our_jid=@p1 AND their_id=@p2`
+	sqliteHasSessionQuery       = `SELECT true FROM whatsmeow_sessions WHERE our_jid=@p1 AND their_id=@p2`
+	mssqlHasSessionQuery        = `SELECT 1 FROM whatsmeow_sessions WITH (NOLOCK) WHERE our_jid=@p1 AND their_id=@p2`
+	mssqlHasDeviceManager       = `SELECT 1 FROM whatsmeow_device WITH (NOLOCK) WHERE manager_id=@p1`
 	getManySessionQueryPostgres = `SELECT their_id, session FROM whatsmeow_sessions WHERE our_jid=$1 AND their_id = ANY($2)`
 	getManySessionQueryGeneric  = `SELECT their_id, session FROM whatsmeow_sessions WHERE our_jid=$1 AND their_id IN (%s)`
-	getManySessionQueryMSSQL  = `SELECT their_id, session FROM whatsmeow_sessions WHERE our_jid=@p1 AND their_id IN (%s)`
-	sqlitePutSessionQuery = `
+	getManySessionQueryMSSQL    = `SELECT their_id, session FROM whatsmeow_sessions WHERE our_jid=@p1 AND their_id IN (%s)`
+	sqlitePutSessionQuery       = `
 		INSERT INTO whatsmeow_sessions (our_jid, their_id, session) VALUES (@p1, @p2, @p3)
 		ON CONFLICT (our_jid, their_id) DO UPDATE SET session=excluded.session
 	`
@@ -825,6 +825,15 @@ func (s *SQLStore) GetManySessions(ctx context.Context, addresses []string) (map
 	var err error
 	if s.db.Dialect == dbutil.Postgres && PostgresArrayWrapper != nil {
 		rows, err = s.db.Query(ctx, getManySessionQueryPostgres, s.JID, PostgresArrayWrapper(addresses))
+	} else if s.db.Dialect == dbutil.MSSQL {
+		args := make([]any, len(addresses)+1)
+		placeholders := make([]string, len(addresses))
+		args[0] = s.JID
+		for i, addr := range addresses {
+			args[i+1] = addr
+			placeholders[i] = fmt.Sprintf("@p%d", i+2)
+		}
+		rows, err = s.db.Query(ctx, fmt.Sprintf(getManySessionQueryMSSQL, strings.Join(placeholders, ",")), args...)
 	} else {
 		args := make([]any, len(addresses)+1)
 		placeholders := make([]string, len(addresses))
@@ -1750,7 +1759,7 @@ const (
 		))
 		ORDER BY timestamp DESC LIMIT 1
 	`
-	mssqlGetPrivacyToken  = `
+	mssqlGetPrivacyToken = `
 		SELECT TOP 1 token, timestamp
 		FROM whatsmeow_privacy_tokens
 		WHERE our_jid = @p1

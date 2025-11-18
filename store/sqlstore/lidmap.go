@@ -199,6 +199,16 @@ func (s *CachedLIDMap) GetManyLIDsForPNs(ctx context.Context, pns []types.JID) (
 			`SELECT lid, pn FROM whatsmeow_lid_map WHERE pn = ANY($1)`,
 			PostgresArrayWrapper(missingPNs),
 		)
+	} else if s.db.Dialect == dbutil.MSSQL {
+		placeholders := make([]string, len(missingPNs))
+		for i := range missingPNs {
+			placeholders[i] = fmt.Sprintf("@p%d", i+1)
+		}
+		rows, err = s.db.Query(
+			ctx,
+			fmt.Sprintf(`SELECT lid, pn FROM whatsmeow_lid_map WHERE pn IN (%s)`, strings.Join(placeholders, ",")),
+			exslices.CastToAny(missingPNs)...,
+		)
 	} else {
 		placeholders := make([]string, len(missingPNs))
 		for i := range missingPNs {

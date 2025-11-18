@@ -1251,14 +1251,6 @@ func (cli *Client) encryptMessageForDevices(
 	participantNodes := make([]waBinary.Node, 0, len(allDevices))
 
 	var pnDevices []types.JID
-	var retryDevices, retryEncryptionIdentities []types.JID
-	var addresses []string
-	for _, jid := range allDevices {
-		addresses = append(addresses, jid.SignalAddress().String())
-	}
-	start := time.Now().UnixMilli()
-	cli.Store.IdentityCache = cli.Store.PrekeysCache.CacheIdentities(ctx, addresses)
-	mid := time.Now().UnixMilli()
 	for _, jid := range allDevices {
 		if jid.Server == types.DefaultUserServer {
 			pnDevices = append(pnDevices, jid)
@@ -1329,55 +1321,6 @@ func (cli *Client) encryptMessageForDevices(
 		return nil, false, fmt.Errorf("failed to save cached sessions: %w", err)
 	}
 	return participantNodes, includeIdentity, nil
-	afterMid := time.Now().UnixMilli()
-	oldIdentityKeys := make([]string, len(cli.Store.IdentityCache))
-	index := 0
-	for key, _ := range cli.Store.IdentityCache {
-		oldIdentityKeys[index] = key
-		index++
-	}
-	if len(retryDevices) > 0 {
-		cli.Store.IdentityCache["dummy"] = [32]byte{}
-		bundles, err := cli.fetchPreKeys(ctx, retryDevices)
-		if err != nil {
-			cli.Log.Warnf("Failed to fetch prekeys for %v to retry encryption: %v", retryDevices, err)
-		} else {
-			for i, jid := range retryDevices {
-				resp := bundles[jid]
-				if resp.err != nil {
-					cli.Log.Warnf("Failed to fetch prekey for %s: %v", jid, resp.err)
-					continue
-				}
-				plaintext := msgPlaintext
-				if (jid.User == ownJID.User || jid.User == ownLID.User) && dsmPlaintext != nil {
-					plaintext = dsmPlaintext
-				}
-				encrypted, isPreKey, err := cli.encryptMessageForDeviceAndWrap(
-					ctx, plaintext, jid, retryEncryptionIdentities[i], resp.bundle, encAttrs,
-				)
-				if err != nil {
-					// TODO return these errors if it's a fatal one (like context cancellation or database)
-					cli.Log.Warnf("Failed to encrypt %s for %s (retry): %v", id, jid, err)
-					continue
-				}
-				participantNodes = append(participantNodes, *encrypted)
-				if isPreKey {
-					includeIdentity = true
-				}
-			}
-		}
-		delete(cli.Store.IdentityCache, "dummy")
-	}
-	afterRetry := time.Now().UnixMilli()
-	if len(cli.Store.IdentityCache) > 0 {
-		cli.Store.PrekeysCache.StoreIdentities(ctx, cli.Store.IdentityCache, oldIdentityKeys)
-	}
-	clear(cli.Store.IdentityCache)
-	end := time.Now().UnixMilli()
-	if end-start >= 1000 {
-		cli.Log.Infof("*****PeerEncrypt: Total: %d, StoreTime: %d, RetryTime: %d, DeviceTime: %d, CacheTime: %d", end-start, end-afterRetry, afterRetry-afterMid, afterMid-mid, mid-start)
-	}
-	return participantNodes, includeIdentity
 }
 
 func (cli *Client) encryptMessageForDeviceAndWrap(
