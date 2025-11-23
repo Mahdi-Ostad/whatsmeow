@@ -15,7 +15,7 @@ CREATE TABLE whatsmeow_device (
 	adv_account_sig_key  VARBINARY(max) NOT NULL CHECK ( LEN(adv_account_sig_key) = 32 ),
 	adv_device_sig  VARBINARY(max) NOT NULL CHECK ( LEN(adv_device_sig) = 64 ),
 	platform      VARCHAR(300) NOT NULL DEFAULT '',
-	business_name VARCHAR(300) NOT NULL DEFAULT '',
+	business_name NVARCHAR(300) NOT NULL DEFAULT '',
 	push_name     VARCHAR(300) NOT NULL DEFAULT '',
 	manager_id     VARCHAR(300) NOT NULL DEFAULT '',
 
@@ -89,8 +89,8 @@ CREATE TABLE whatsmeow_contacts (
 	their_jid     VARCHAR(300),
 	first_name    VARCHAR(300),
 	full_name     VARCHAR(300),
-	push_name     VARCHAR(300),
-	business_name VARCHAR(300),
+	push_name     NVARCHAR(300),
+	business_name NVARCHAR(300),
 	redacted_phone VARCHAR(300),
 	PRIMARY KEY (our_jid, their_jid),
 	FOREIGN KEY (our_jid) REFERENCES whatsmeow_device(jid) ON DELETE CASCADE ON UPDATE CASCADE
