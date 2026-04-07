@@ -16,12 +16,14 @@ import (
 	"net/http"
 	"net/url"
 	"runtime/debug"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"go.mau.fi/util/exhttp"
 	"go.mau.fi/util/exsync"
+	"go.mau.fi/util/ptr"
 	"go.mau.fi/util/random"
 	"golang.org/x/net/proxy"
 
@@ -68,6 +70,7 @@ type Client struct {
 
 	isLoggedIn            atomic.Bool
 	expectedDisconnect    *exsync.Event
+	forceAutoReconnect    atomic.Bool
 	EnableAutoReconnect   bool
 	InitialAutoReconnect  bool
 	LastSuccessfulConnect time.Time
@@ -87,6 +90,7 @@ type Client struct {
 	// EmitAppStateEventsOnFullSync can be set to true if you want to get app state events emitted
 	// even when re-syncing the whole state.
 	EmitAppStateEventsOnFullSync bool
+	AppStateDebugLogs            bool
 
 	AutomaticMessageRerequestFromPhone bool
 	pendingPhoneRerequests             map[types.MessageID]context.CancelFunc
@@ -140,10 +144,16 @@ type Client struct {
 	sessionRecreateHistoryLock sync.Mutex
 	// GetMessageForRetry is used to find the source message for handling retry receipts
 	// when the message is not found in the recently sent message cache.
+	// Note: in DMs, the "to" field may be different from what you originally sent to (LID vs phone number),
+	// make sure to check both if necessary.
 	GetMessageForRetry func(requester, to types.JID, id types.MessageID) *waE2E.Message
 	// PreRetryCallback is called before a retry receipt is accepted.
 	// If it returns false, the accepting will be cancelled and the retry receipt will be ignored.
 	PreRetryCallback func(receipt *events.Receipt, id types.MessageID, retryCount int, msg *waE2E.Message) bool
+	// Should whatsmeow store recently sent messages in the database so that retry receipts can be accepted
+	// even if the process is restarted? If false, only the in-memory cache and GetMessageForRetry will be used.
+	UseRetryMessageStore bool
+	lastRetryStoreClear  time.Time
 
 	// PrePairCallback is called before pairing is completed. If it returns false, the pairing will be cancelled and
 	// the client will disconnect.
@@ -169,6 +179,8 @@ type Client struct {
 
 	uniqueID  string
 	idCounter atomic.Uint64
+
+	serverTimeOffset atomic.Int64
 
 	mediaHTTP     *http.Client
 	websocketHTTP *http.Client
@@ -226,9 +238,9 @@ func NewClient(deviceStore *store.Device, log waLog.Logger) *Client {
 		Transport: (http.DefaultTransport.(*http.Transport)).Clone(),
 	}
 	cli := &Client{
-		mediaHTTP:          baseHTTPClient,
-		websocketHTTP:      baseHTTPClient,
-		preLoginHTTP:       baseHTTPClient,
+		mediaHTTP:          ptr.Clone(baseHTTPClient),
+		websocketHTTP:      ptr.Clone(baseHTTPClient),
+		preLoginHTTP:       ptr.Clone(baseHTTPClient),
 		Store:              deviceStore,
 		Log:                log,
 		recvLog:            log.Sub("Recv"),
@@ -449,6 +461,24 @@ func (cli *Client) Connect() error {
 	return cli.ConnectContext(cli.BackgroundEventCtx)
 }
 
+func isRetryableConnectError(err error) bool {
+	if exhttp.IsNetworkError(err) {
+		return true
+	}
+
+	var statusErr socket.ErrWithStatusCode
+	if errors.As(err, &statusErr) {
+		switch statusErr.StatusCode {
+		case 408, 500, 501, 502, 503, 504:
+			return true
+		default:
+			return false
+		}
+	}
+
+	return errors.Is(err, socket.ErrDialFailed)
+}
+
 func (cli *Client) ConnectContext(ctx context.Context) error {
 	if cli == nil {
 		return ErrClientIsNil
@@ -458,7 +488,7 @@ func (cli *Client) ConnectContext(ctx context.Context) error {
 	defer cli.socketLock.Unlock()
 
 	err := cli.unlockedConnect(ctx)
-	if exhttp.IsNetworkError(err) && cli.InitialAutoReconnect && cli.EnableAutoReconnect {
+	if isRetryableConnectError(err) && cli.InitialAutoReconnect && cli.EnableAutoReconnect {
 		cli.Log.Errorf("Initial connection failed but reconnecting in background (%v)", err)
 		go cli.dispatchEvent(&events.Disconnected{})
 		go cli.autoReconnect(ctx)
@@ -475,6 +505,9 @@ func (cli *Client) connect(ctx context.Context) error {
 }
 
 func (cli *Client) unlockedConnect(ctx context.Context) error {
+	if cli.Store.Deleted {
+		return store.ErrDeviceDeleted
+	}
 	if cli.socket != nil {
 		if !cli.socket.IsConnected() {
 			cli.unlockedDisconnect()
@@ -517,13 +550,13 @@ func (cli *Client) IsLoggedIn() bool {
 }
 
 func (cli *Client) onDisconnect(ctx context.Context, ns *socket.NoiseSocket, remote bool) {
-	ns.Stop(false)
+	ns.Stop(false, false)
 	cli.socketLock.Lock()
 	defer cli.socketLock.Unlock()
 	if cli.socket == ns {
 		cli.socket = nil
 		cli.clearResponseWaiters(xmlStreamEndNode)
-		if !cli.isExpectedDisconnect() && remote {
+		if !cli.isExpectedDisconnect() && (cli.forceAutoReconnect.Swap(false) || remote) {
 			cli.Log.Debugf("Emitting Disconnected event")
 			go cli.dispatchEvent(&events.Disconnected{})
 			go cli.autoReconnect(ctx)
@@ -538,10 +571,12 @@ func (cli *Client) onDisconnect(ctx context.Context, ns *socket.NoiseSocket, rem
 }
 
 func (cli *Client) expectDisconnect() {
+	cli.forceAutoReconnect.Store(false)
 	cli.expectedDisconnect.Set()
 }
 
 func (cli *Client) resetExpectedDisconnect() {
+	cli.forceAutoReconnect.Store(false)
 	cli.expectedDisconnect.Clear()
 }
 
@@ -611,10 +646,25 @@ func (cli *Client) Disconnect() {
 	cli.clearDelayedMessageRequests()
 }
 
+// ResetConnection disconnects from the WhatsApp web websocket and forces an automatic reconnection.
+// This will not do anything if the socket is already disconnected or if EnableAutoReconnect is false.
+func (cli *Client) ResetConnection() {
+	if cli == nil {
+		return
+	}
+	cli.socketLock.Lock()
+	cli.forceAutoReconnect.Store(true)
+	if cli.socket != nil {
+		cli.socket.Stop(true, true)
+		cli.clearResponseWaiters(xmlStreamEndNode)
+	}
+	cli.socketLock.Unlock()
+}
+
 // Disconnect closes the websocket connection.
 func (cli *Client) unlockedDisconnect() {
 	if cli.socket != nil {
-		cli.socket.Stop(true)
+		cli.socket.Stop(true, false)
 		cli.socket = nil
 		cli.clearResponseWaiters(xmlStreamEndNode)
 	}
@@ -940,5 +990,38 @@ func (cli *Client) StoreLIDPNMapping(ctx context.Context, first, second types.JI
 	err := cli.Store.LIDs.PutLIDMapping(ctx, lid, pn)
 	if err != nil {
 		cli.Log.Errorf("Failed to store LID-PN mapping for %s -> %s: %v", lid, pn, err)
+	}
+}
+
+const unifiedOffset = 3 * 24 * time.Hour
+const week = 7 * 24 * time.Hour
+
+func (cli *Client) getUnifiedSessionID() string {
+	unifiedTS := time.Now().
+		Add(time.Duration(cli.serverTimeOffset.Load())).
+		Add(unifiedOffset)
+	unifiedID := unifiedTS.UnixMilli() % week.Milliseconds()
+	return strconv.FormatInt(unifiedID, 10)
+}
+
+func (cli *Client) sendUnifiedSession() {
+	if cli == nil {
+		return
+	}
+
+	node := waBinary.Node{
+		Tag:   "ib",
+		Attrs: waBinary.Attrs{},
+		Content: []waBinary.Node{{
+			Tag: "unified_session",
+			Attrs: waBinary.Attrs{
+				"id": cli.getUnifiedSessionID(),
+			},
+		}},
+	}
+
+	err := cli.sendNode(cli.BackgroundEventCtx, node)
+	if err != nil {
+		cli.Log.Debugf("Failed to send unified_session telemetry: %v", err)
 	}
 }

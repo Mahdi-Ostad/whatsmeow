@@ -53,6 +53,7 @@ message HistorySync {
 	optional string companionMetaNonce = 16;
 	optional bytes shareableChatIdentifierEncryptionKey = 17;
 	repeated Account accounts = 18;
+	optional bytes nctSalt = 19;
 }
 
 message Conversation {
@@ -60,6 +61,7 @@ message Conversation {
 		COMPLETE_BUT_MORE_MESSAGES_REMAIN_ON_PRIMARY = 0;
 		COMPLETE_AND_NO_MORE_MESSAGE_REMAIN_ON_PRIMARY = 1;
 		COMPLETE_ON_DEMAND_SYNC_BUT_MORE_MSG_REMAIN_ON_PRIMARY = 2;
+		COMPLETE_ON_DEMAND_SYNC_WITH_MORE_MSG_ON_PRIMARY_BUT_NO_ACCESS = 3;
 	}
 
 	required string ID = 1;
@@ -116,6 +118,9 @@ message Conversation {
 	optional WACommon.LimitSharing.Trigger limitSharingTrigger = 52;
 	optional bool limitSharingInitiatedByMe = 53;
 	optional bool maibaAiThreadEnabled = 54;
+	optional bool isMarketingMessageThread = 55;
+	optional bool isSenderNewAccount = 56;
+	optional uint32 afterReadDuration = 57;
 }
 
 message GroupParticipant {
@@ -166,6 +171,7 @@ message Pushname {
 message WallpaperSettings {
 	optional string filename = 1;
 	optional uint32 opacity = 2;
+	optional bool isGenAi = 3;
 }
 
 message GlobalSettings {

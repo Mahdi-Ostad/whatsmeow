@@ -363,8 +363,7 @@ const (
 			INSERT (jid, lid, registration_id, noise_key, identity_key, signed_pre_key, signed_pre_key_id, signed_pre_key_sig, adv_key, adv_details, adv_account_sig, adv_account_sig_key, adv_device_sig, platform, business_name, push_name, facebook_uuid, lid_migration_ts, manager_id)
 			VALUES (source.jid, source.lid, source.registration_id, CONVERT(varbinary(max),source.noise_key), source.identity_key, source.signed_pre_key, source.signed_pre_key_id, source.signed_pre_key_sig, source.adv_key, source.adv_details, source.adv_account_sig, source.adv_account_sig_key, source.adv_device_sig, source.platform, source.business_name, source.push_name, source.facebook_uuid, source.lid_migration_ts, source.manager_id);
 	`
-	deleteDeviceQuery  = `DELETE FROM whatsmeow_device WHERE jid=@p1`
-	deleteMessageNodes = `DELETE FROM whatsapp_message_node WHERE our_jid=@p1`
+	deleteDeviceQuery = `DELETE FROM whatsmeow_device WHERE jid=@p1`
 )
 
 // NewDevice creates a new device in this database.
@@ -439,18 +438,7 @@ func (c *Container) PutDevice(ctx context.Context, device *store.Device) error {
 
 func (c *Container) initializeDevice(device *store.Device) {
 	innerStore := NewSQLStore(c, *device.ID)
-	device.Identities = innerStore
-	device.Sessions = innerStore
-	device.PreKeys = innerStore
-	device.SenderKeys = innerStore
-	device.AppStateKeys = innerStore
-	device.AppState = innerStore
-	device.Contacts = innerStore
-	device.ChatSettings = innerStore
-	device.MsgSecrets = innerStore
-	device.PrivacyTokens = innerStore
-	device.PrekeysCache = innerStore
-	device.EventBuffer = innerStore
+	device.SetAllStores(innerStore)
 	device.LIDs = c.LIDMap
 	device.Container = c
 	device.Initialized = true
@@ -462,15 +450,5 @@ func (c *Container) DeleteDevice(ctx context.Context, store *store.Device) error
 		return ErrDeviceIDMustBeSet
 	}
 	_, err := c.db.Exec(ctx, deleteDeviceQuery, store.ID)
-	return err
-}
-
-func (c *Container) DeleteMessageNode(ctx context.Context, store *store.Device) error {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	if store.ID == nil {
-		return ErrDeviceIDMustBeSet
-	}
-	_, err := c.db.RawDB.Exec(deleteMessageNodes, store.ID.String())
 	return err
 }

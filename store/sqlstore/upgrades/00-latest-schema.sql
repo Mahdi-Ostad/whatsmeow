@@ -1,4 +1,4 @@
--- v0 -> v11 (compatible with v8+): Latest schema
+-- v0 -> v13 (compatible with v8+): Latest schema
 CREATE TABLE whatsmeow_device (
 	jid VARCHAR(300) PRIMARY KEY ,
 	lid VARCHAR(300),
@@ -121,8 +121,12 @@ CREATE TABLE whatsmeow_privacy_tokens (
 	their_jid VARCHAR(300),
 	token     VARBINARY(max)  NOT NULL,
 	timestamp_info BIGINT NOT NULL,
+	sender_timestamp BIGINT,
 	PRIMARY KEY (our_jid, their_jid)
 );
+
+CREATE INDEX idx_whatsmeow_privacy_tokens_our_jid_timestamp
+ON whatsmeow_privacy_tokens (our_jid, timestamp);
 
 CREATE TABLE whatsmeow_lid_map (
     lid NVARCHAR(300) PRIMARY KEY,
@@ -138,3 +142,17 @@ CREATE TABLE whatsmeow_event_buffer (
 	PRIMARY KEY (our_jid, ciphertext_hash),
 	FOREIGN KEY (our_jid) REFERENCES whatsmeow_device(jid) ON DELETE CASCADE ON UPDATE CASCADE
 );
+
+CREATE TABLE whatsmeow_retry_buffer (
+	our_jid    TEXT   NOT NULL,
+	chat_jid   TEXT   NOT NULL,
+	message_id TEXT   NOT NULL,
+	format     TEXT   NOT NULL,
+	plaintext  bytea  NOT NULL,
+	timestamp  BIGINT NOT NULL,
+
+	PRIMARY KEY (our_jid, chat_jid, message_id),
+	FOREIGN KEY (our_jid) REFERENCES whatsmeow_device(jid) ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+CREATE INDEX whatsmeow_retry_buffer_timestamp_idx ON whatsmeow_retry_buffer (our_jid, timestamp);

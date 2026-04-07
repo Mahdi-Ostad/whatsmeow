@@ -1105,6 +1105,8 @@ const (
 	mssqlGetAppStateSyncKeyQuery          = `SELECT key_data, timestamp_info, fingerprint FROM whatsmeow_app_state_sync_keys WITH (NOLOCK) WHERE jid=@p1 AND key_id=@p2`
 	sqliteGetLatestAppStateSyncKeyIDQuery = `SELECT key_id FROM whatsmeow_app_state_sync_keys WHERE jid=@p1 ORDER BY timestamp DESC LIMIT 1`
 	mssqlGetLatestAppStateSyncKeyIDQuery  = `SELECT TOP 1 key_id FROM whatsmeow_app_state_sync_keys WITH (NOLOCK) WHERE jid=@p1 ORDER BY timestamp_info DESC`
+	mssqlGetAllAppStateSyncKeysQuery      = `SELECT key_data, timestamp_info, fingerprint FROM whatsmeow_app_state_sync_keys WITH (NOLOCK) WHERE jid=@p1 ORDER BY timestamp_info DESC`
+	sqliteGetAllAppStateSyncKeysQuery     = `SELECT key_data, timestamp, fingerprint FROM whatsmeow_app_state_sync_keys WHERE jid=$1 ORDER BY timestamp DESC`
 )
 
 func (s *SQLStore) PutAppStateSyncKey(ctx context.Context, id []byte, key store.AppStateSyncKey) error {
@@ -1116,6 +1118,32 @@ func (s *SQLStore) PutAppStateSyncKey(ctx context.Context, id []byte, key store.
 	}
 	_, err := s.db.Exec(ctx, sqlitePutAppStateSyncKeyQuery, s.JID, id, key.Data, key.Timestamp, key.Fingerprint)
 	return err
+}
+
+func (s *SQLStore) GetAllAppStateSyncKeys(ctx context.Context) ([]*store.AppStateSyncKey, error) {
+	var rows dbutil.Rows
+	var err error
+	switch s.db.Dialect {
+	case dbutil.MSSQL:
+		rows, err = s.db.Query(ctx, mssqlGetAllAppStateSyncKeysQuery, s.JID)
+	default:
+		rows, err = s.db.Query(ctx, sqliteGetAllAppStateSyncKeysQuery, s.JID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out []*store.AppStateSyncKey
+	for rows.Next() {
+		var item store.AppStateSyncKey
+		err = rows.Scan(&item.Data, &item.Timestamp, &item.Fingerprint)
+		if err != nil {
+			return nil, err
+		}
+		if len(item.Data) > 0 {
+			out = append(out, &item)
+		}
+	}
+	return out, rows.Close()
 }
 
 func (s *SQLStore) GetAppStateSyncKey(ctx context.Context, id []byte) (*store.AppStateSyncKey, error) {
@@ -1198,6 +1226,8 @@ func (s *SQLStore) GetAppStateVersion(ctx context.Context, name string) (version
 	} else if len(uncheckedHash) != 128 {
 		// This shouldn't happen
 		err = ErrInvalidLength
+	} else if version == 0 {
+		err = fmt.Errorf("invalid saved app state version 0 for name %s (hash %x)", name, uncheckedHash)
 	} else {
 		// No errors, convert hash slice to array
 		hash = *(*[128]byte)(uncheckedHash)
@@ -1984,5 +2014,70 @@ func (s *SQLStore) DeleteOldBufferedHashes(ctx context.Context) error {
 		return err
 	}
 	_, err := s.db.Exec(ctx, sqliteDeleteOldBufferedHashesQuery, time.Now().Add(-14*24*time.Hour).UnixMilli())
+	return err
+}
+
+const (
+	sqliteGetOutgoingEventQuery = `
+		SELECT format, plaintext FROM whatsmeow_retry_buffer WHERE our_jid=$1 AND (chat_jid=$2 OR chat_jid=$3) AND message_id=$4
+	`
+	mssqlGetOutgoingEventQuery = `
+		SELECT format, plaintext FROM whatsmeow_retry_buffer WITH (NOLOCK) WHERE our_jid=@p1 AND (chat_jid=@p2 OR chat_jid=@p3) AND message_id=@p4
+	`
+	sqliteAddOutgoingEventQuery = `
+		INSERT INTO whatsmeow_retry_buffer (our_jid, chat_jid, message_id, format, plaintext, timestamp)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (our_jid, chat_jid, message_id) DO UPDATE
+			SET format=excluded.format, plaintext=excluded.plaintext, timestamp=excluded.timestamp
+	`
+	mssqlAddOutgoingEventQuery = `
+		MERGE INTO whatsmeow_retry_buffer AS target
+    	USING (VALUES (@p1, @p2, @p3, @p4, @p5, @p6))
+        	AS source (our_jid, chat_jid, message_id, format, plaintext, timestamp_info)
+    	ON target.our_jid = source.our_jid 
+       		AND target.chat_jid = source.chat_jid 
+       		AND target.message_id = source.message_id
+    	WHEN MATCHED THEN
+        	UPDATE SET 
+            	format    = source.format,
+            	plaintext = source.plaintext,
+            	timestamp_info = source.timestamp_info
+    	WHEN NOT MATCHED THEN
+        	INSERT (our_jid, chat_jid, message_id, format, plaintext, timestamp_info)
+        	VALUES (source.our_jid, source.chat_jid, source.message_id, 
+                source.format, source.plaintext, source.timestamp_info);
+	`
+	sqliteDeleteOldOutgoingEventsQuery = `
+		DELETE FROM whatsmeow_retry_buffer WHERE our_jid=$1 AND timestamp < $2
+	`
+	mssqlDeleteOldOutgoingEventsQuery = `
+		DELETE FROM whatsmeow_retry_buffer WHERE our_jid=@p1 AND timestamp_info < @p2
+	`
+)
+
+func (s *SQLStore) GetOutgoingEvent(ctx context.Context, chatJID, altChatJID types.JID, id types.MessageID) (format string, result []byte, err error) {
+	if s.db.Dialect == dbutil.MSSQL {
+		err = s.db.QueryRow(ctx, mssqlGetOutgoingEventQuery, s.JID, chatJID, altChatJID, id).Scan(&format, &result)
+		return
+	}
+	err = s.db.QueryRow(ctx, sqliteGetOutgoingEventQuery, s.JID, chatJID, altChatJID, id).Scan(&format, &result)
+	return
+}
+
+func (s *SQLStore) AddOutgoingEvent(ctx context.Context, chatJID types.JID, id types.MessageID, format string, plaintext []byte) error {
+	if s.db.Dialect == dbutil.MSSQL {
+		_, err := s.db.Exec(ctx, mssqlAddOutgoingEventQuery, s.JID, chatJID, id, format, plaintext, time.Now().UnixMilli())
+		return err
+	}
+	_, err := s.db.Exec(ctx, sqliteAddOutgoingEventQuery, s.JID, chatJID, id, format, plaintext, time.Now().UnixMilli())
+	return err
+}
+
+func (s *SQLStore) DeleteOldOutgoingEvents(ctx context.Context) error {
+	if s.db.Dialect == dbutil.MSSQL {
+		_, err := s.db.Exec(ctx, mssqlDeleteOldOutgoingEventsQuery, s.JID, time.Now().Add(-7*24*time.Hour).UnixMilli())
+		return err
+	}
+	_, err := s.db.Exec(ctx, sqliteDeleteOldOutgoingEventsQuery, s.JID, time.Now().Add(-7*24*time.Hour).UnixMilli())
 	return err
 }
