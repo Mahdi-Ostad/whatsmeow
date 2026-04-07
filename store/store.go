@@ -122,7 +122,6 @@ type ChatSettingsStore interface {
 type DeviceContainer interface {
 	PutDevice(ctx context.Context, store *Device) error
 	DeleteDevice(ctx context.Context, store *Device) error
-	DeleteMessageNode(ctx context.Context, store *Device) error
 }
 
 type MessageSecretInsert struct {
@@ -196,6 +195,7 @@ type AllSessionSpecificStores interface {
 	MsgSecretStore
 	PrivacyTokenStore
 	EventBuffer
+	PrekeysCacheStore
 }
 
 type PrekeysCacheStore interface {
@@ -291,10 +291,6 @@ func (device *Device) Delete(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	err = device.Container.DeleteMessageNode(ctx, device)
-	if err != nil {
-		return err
-	}
 	device.ID = nil
 	device.LID = types.EmptyJID
 	device.Deleted = true
@@ -314,6 +310,7 @@ func (device *Device) SetAllStores(store AllSessionSpecificStores) {
 	device.MsgSecrets = store
 	device.PrivacyTokens = store
 	device.EventBuffer = store
+	device.PrekeysCache = store
 }
 
 func (device *Device) GetAltJID(ctx context.Context, jid types.JID) (types.JID, error) {

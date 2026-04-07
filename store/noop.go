@@ -11,6 +11,7 @@ import (
 	"errors"
 	"time"
 
+	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/util/keys"
 )
@@ -276,10 +277,6 @@ func (n *NoopStore) PutLIDMapping(ctx context.Context, lid types.JID, jid types.
 	return n.Error
 }
 
-func (n *NoopStore) DeleteMessageNode(ctx context.Context, store *Device) error {
-	return n.Error
-}
-
 func (n *NoopStore) DeleteOldOutgoingEvents(ctx context.Context) error {
 	return nil
 }
@@ -289,5 +286,21 @@ func (n *NoopStore) GetOutgoingEvent(ctx context.Context, chatJID, altChatJID ty
 }
 
 func (n *NoopStore) AddOutgoingEvent(ctx context.Context, chatJID types.JID, id types.MessageID, format string, plaintext []byte) error {
+	return nil
+}
+
+func (n *NoopStore) PutMessageNode(ctx context.Context, user string, group *string, node *waBinary.Node) error {
+	return nil
+}
+func (n *NoopStore) GetMessageNodesByUser(ctx context.Context, user string) (map[int]waBinary.Node, error) {
+	return nil, nil
+}
+func (n *NoopStore) GetMessageNodesByGroup(ctx context.Context, group string) (map[int]waBinary.Node, error) {
+	return nil, nil
+}
+func (n *NoopStore) DeleteMessageNode(ctx context.Context, ref int) error {
+	return nil
+}
+func (n *NoopStore) DeleteOldMessageNodes(ctx context.Context) error {
 	return nil
 }
