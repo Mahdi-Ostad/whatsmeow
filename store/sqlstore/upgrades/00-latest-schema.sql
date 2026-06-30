@@ -129,8 +129,8 @@ CREATE INDEX idx_whatsmeow_privacy_tokens_our_jid_timestamp
 ON whatsmeow_privacy_tokens (our_jid, timestamp_info);
 
 CREATE TABLE whatsmeow_nct_salt (
-	our_jid TEXT PRIMARY KEY,
-	salt    bytea NOT NULL,
+	our_jid VARCHAR(300) PRIMARY KEY,
+	salt    VARBINARY(max) NOT NULL,
 	FOREIGN KEY (our_jid) REFERENCES whatsmeow_device(jid) ON DELETE CASCADE ON UPDATE CASCADE
 );
 

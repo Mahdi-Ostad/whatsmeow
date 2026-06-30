@@ -956,11 +956,11 @@ func (s *SQLStore) GetOrGenPreKeys(ctx context.Context, count uint32) ([]*keys.P
 	s.preKeyLock.Lock()
 	defer s.preKeyLock.Unlock()
 	var err error
-	var res dbutil.Rows
+	var newKeys []*keys.PreKey
 	if s.db.Dialect == dbutil.MSSQL {
-		res, err = scanPreKey.NewRowIter(s.db.Query(ctx, mssqlGetUnuploadedPreKeysQuery, count, s.JID))
+		newKeys, err = scanPreKey.NewRowIter(s.db.Query(ctx, mssqlGetUnuploadedPreKeysQuery, count, s.JID)).AsList()
 	} else {
-		res, err = scanPreKey.NewRowIter(s.db.Query(ctx, sqliteGetUnuploadedPreKeysQuery, s.JID, count))
+		newKeys, err = scanPreKey.NewRowIter(s.db.Query(ctx, sqliteGetUnuploadedPreKeysQuery, s.JID, count)).AsList()
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to query existing prekeys: %w", err)
@@ -1129,12 +1129,12 @@ func (s *SQLStore) GetAllAppStateSyncKeys(ctx context.Context) ([]*store.AppStat
 }
 
 func (s *SQLStore) GetAppStateSyncKey(ctx context.Context, id []byte) (*store.AppStateSyncKey, error) {
-	var key store.AppStateSyncKey
+	var key *store.AppStateSyncKey
 	var err error
 	if s.db.Dialect == dbutil.MSSQL {
-		key, err = convertAppStateSyncKeyRow(s.db.QueryRow(ctx, mssqlGetAppStateSyncKeyQuery, s.JID, id).Scan(&key.Data, &key.Timestamp, &key.Fingerprint))
+		key, err = convertAppStateSyncKeyRow(s.db.QueryRow(ctx, mssqlGetAppStateSyncKeyQuery, s.JID, id))
 	} else {
-		key, err = convertAppStateSyncKeyRow(s.db.QueryRow(ctx, sqliteGetAppStateSyncKeyQuery, s.JID, id).Scan(&key.Data, &key.Timestamp, &key.Fingerprint))
+		key, err = convertAppStateSyncKeyRow(s.db.QueryRow(ctx, sqliteGetAppStateSyncKeyQuery, s.JID, id))
 	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -1785,6 +1785,27 @@ const (
 	`
 )
 
+const (
+	sqlitePutNCTSaltQuery = `
+		INSERT INTO whatsmeow_nct_salt (our_jid, salt) VALUES ($1, $2)
+		ON CONFLICT (our_jid) DO UPDATE SET salt=excluded.salt
+	`
+	mssqlPutNCTSaltQuery = `
+		MERGE INTO whatsmeow_nct_salt AS target
+		USING (VALUES (@p1, @p2)) AS source (our_jid, salt)
+		ON (target.our_jid = source.our_jid)
+		WHEN MATCHED THEN
+			UPDATE SET target.salt = source.salt
+		WHEN NOT MATCHED THEN
+			INSERT (our_jid, salt)
+			VALUES (source.our_jid, source.salt);
+	`
+	sqliteGetNCTSaltQuery    = `SELECT salt FROM whatsmeow_nct_salt WHERE our_jid=$1`
+	mssqlGetNCTSaltQuery     = `SELECT salt FROM whatsmeow_nct_salt WITH (NOLOCK) WHERE our_jid=@p1`
+	sqliteDeleteNCTSaltQuery = `DELETE FROM whatsmeow_nct_salt WHERE our_jid=$1`
+	mssqlDeleteNCTSaltQuery  = `DELETE FROM whatsmeow_nct_salt WHERE our_jid=@p1`
+)
+
 func (s *SQLStore) PutPrivacyTokens(ctx context.Context, tokens ...store.PrivacyToken) error {
 	return s.db.DoTxn(ctx, nil, func(ctx context.Context) error {
 		dt := time.Now()
@@ -1804,9 +1825,10 @@ func (s *SQLStore) PutPrivacyTokens(ctx context.Context, tokens ...store.Privacy
 			return fmt.Errorf("failed to prepare bulk: %w", err)
 		}
 		for _, token := range tokens {
-			var senderTimestamp int* = nil
+			var senderTimestamp *int64 = nil
 			if !token.SenderTimestamp.IsZero() {
-				senderTimestamp = token.SenderTimestamp.Unix()
+				timeStamp := token.SenderTimestamp.Unix()
+				senderTimestamp = &timeStamp
 			}
 			_, err = stmt.Exec(s.JID, token.User.ToNonAD().String(), token.Token, token.Timestamp.Unix(), senderTimestamp)
 			if err != nil {
@@ -1864,13 +1886,24 @@ func (s *SQLStore) GetPrivacyToken(ctx context.Context, user types.JID) (*store.
 }
 
 func (s *SQLStore) PutNCTSalt(ctx context.Context, salt []byte) error {
-	_, err := s.db.Exec(ctx, putNCTSaltQuery, s.JID, salt)
+	if s.db.Dialect == dbutil.MSSQL {
+		_, err := s.db.Exec(ctx, mssqlPutNCTSaltQuery, s.JID, salt)
+		return err
+	}
+	_, err := s.db.Exec(ctx, sqlitePutNCTSaltQuery, s.JID, salt)
 	return err
 }
 
 func (s *SQLStore) GetNCTSalt(ctx context.Context) ([]byte, error) {
 	var salt []byte
-	err := s.db.QueryRow(ctx, getNCTSaltQuery, s.JID).Scan(&salt)
+	var err error
+	switch s.db.Dialect {
+	case dbutil.MSSQL:
+		err = s.db.QueryRow(ctx, mssqlGetNCTSaltQuery, s.JID).Scan(&salt)
+	default:
+		err = s.db.QueryRow(ctx, sqliteGetNCTSaltQuery, s.JID).Scan(&salt)
+	}
+
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	} else if err != nil {
@@ -1880,12 +1913,23 @@ func (s *SQLStore) GetNCTSalt(ctx context.Context) ([]byte, error) {
 }
 
 func (s *SQLStore) DeleteNCTSalt(ctx context.Context) error {
-	_, err := s.db.Exec(ctx, deleteNCTSaltQuery, s.JID)
+	if s.db.Dialect == dbutil.MSSQL {
+		_, err := s.db.Exec(ctx, mssqlDeleteNCTSaltQuery, s.JID)
+		return err
+	}
+	_, err := s.db.Exec(ctx, sqliteDeleteNCTSaltQuery, s.JID)
 	return err
 }
 
 func (s *SQLStore) DeleteExpiredPrivacyTokens(ctx context.Context, cutoff time.Time) (int64, error) {
-	res, err := s.db.Exec(ctx, deleteExpiredPrivacyTokens, s.JID, cutoff.Unix())
+	var res sql.Result
+	var err error
+	switch s.db.Dialect {
+	case dbutil.MSSQL:
+		res, err = s.db.Exec(ctx, mssqlDeleteExpiredPrivacyTokens, s.JID, cutoff.Unix())
+	default:
+		res, err = s.db.Exec(ctx, sqliteDeleteExpiredPrivacyTokens, s.JID, cutoff.Unix())
+	}
 	if err != nil {
 		return 0, err
 	}
