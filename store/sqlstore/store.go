@@ -958,33 +958,23 @@ func (s *SQLStore) GetOrGenPreKeys(ctx context.Context, count uint32) ([]*keys.P
 	var err error
 	var res dbutil.Rows
 	if s.db.Dialect == dbutil.MSSQL {
-		res, err = s.db.Query(ctx, mssqlGetUnuploadedPreKeysQuery, count, s.JID)
+		res, err = scanPreKey.NewRowIter(s.db.Query(ctx, mssqlGetUnuploadedPreKeysQuery, count, s.JID))
 	} else {
-		res, err = s.db.Query(ctx, sqliteGetUnuploadedPreKeysQuery, s.JID, count)
+		res, err = scanPreKey.NewRowIter(s.db.Query(ctx, sqliteGetUnuploadedPreKeysQuery, s.JID, count))
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to query existing prekeys: %w", err)
 	}
-	newKeys := make([]*keys.PreKey, count)
-	var existingCount uint32
-	for res.Next() {
-		var key *keys.PreKey
-		key, err = scanPreKey(res)
-		if err != nil {
-			return nil, err
-		} else if key != nil {
-			newKeys[existingCount] = key
-			existingCount++
-		}
-	}
 
-	if existingCount < uint32(len(newKeys)) {
+	alreadyGeneratedCount := uint32(len(newKeys))
+	if count > alreadyGeneratedCount {
 		var nextKeyID uint32
 		nextKeyID, err = s.getNextPreKeyID(ctx)
 		if err != nil {
 			return nil, err
 		}
-		for i := existingCount; i < count; i++ {
+		newKeys = slices.Grow(newKeys, int(count)-len(newKeys))[:count]
+		for i := alreadyGeneratedCount; i < count; i++ {
 			newKeys[i], err = s.genOnePreKey(ctx, nextKeyID, false)
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate prekey: %w", err)
@@ -996,7 +986,7 @@ func (s *SQLStore) GetOrGenPreKeys(ctx context.Context, count uint32) ([]*keys.P
 	return newKeys, nil
 }
 
-func scanPreKey(row dbutil.Scannable) (*keys.PreKey, error) {
+var scanPreKey = dbutil.ConvertRowFn[*keys.PreKey](func(row dbutil.Scannable) (*keys.PreKey, error) {
 	var priv []byte
 	var id uint32
 	err := row.Scan(&id, &priv)
@@ -1011,7 +1001,7 @@ func scanPreKey(row dbutil.Scannable) (*keys.PreKey, error) {
 		KeyPair: *keys.NewKeyPairFromPrivateKey(*(*[32]byte)(priv)),
 		KeyID:   id,
 	}, nil
-}
+})
 
 func (s *SQLStore) GetPreKey(ctx context.Context, id uint32) (*keys.PreKey, error) {
 	if s.db.Dialect == dbutil.MSSQL {
@@ -1120,44 +1110,36 @@ func (s *SQLStore) PutAppStateSyncKey(ctx context.Context, id []byte, key store.
 	return err
 }
 
-func (s *SQLStore) GetAllAppStateSyncKeys(ctx context.Context) ([]*store.AppStateSyncKey, error) {
-	var rows dbutil.Rows
-	var err error
-	switch s.db.Dialect {
-	case dbutil.MSSQL:
-		rows, err = s.db.Query(ctx, mssqlGetAllAppStateSyncKeysQuery, s.JID)
-	default:
-		rows, err = s.db.Query(ctx, sqliteGetAllAppStateSyncKeysQuery, s.JID)
-	}
+var convertAppStateSyncKeyRow = dbutil.ConvertRowFn[*store.AppStateSyncKey](func(rows dbutil.Scannable) (*store.AppStateSyncKey, error) {
+	var item store.AppStateSyncKey
+	err := rows.Scan(&item.Data, &item.Timestamp, &item.Fingerprint)
 	if err != nil {
 		return nil, err
 	}
-	var out []*store.AppStateSyncKey
-	for rows.Next() {
-		var item store.AppStateSyncKey
-		err = rows.Scan(&item.Data, &item.Timestamp, &item.Fingerprint)
-		if err != nil {
-			return nil, err
-		}
-		if len(item.Data) > 0 {
-			out = append(out, &item)
-		}
+	return &item, nil
+})
+
+func (s *SQLStore) GetAllAppStateSyncKeys(ctx context.Context) ([]*store.AppStateSyncKey, error) {
+	switch s.db.Dialect {
+	case dbutil.MSSQL:
+		return convertAppStateSyncKeyRow.NewRowIter(s.db.Query(ctx, mssqlGetAllAppStateSyncKeysQuery, s.JID)).AsList()
+	default:
+		return convertAppStateSyncKeyRow.NewRowIter(s.db.Query(ctx, sqliteGetAllAppStateSyncKeysQuery, s.JID)).AsList()
 	}
-	return out, rows.Close()
 }
 
 func (s *SQLStore) GetAppStateSyncKey(ctx context.Context, id []byte) (*store.AppStateSyncKey, error) {
 	var key store.AppStateSyncKey
 	var err error
 	if s.db.Dialect == dbutil.MSSQL {
-		err = s.db.QueryRow(ctx, mssqlGetAppStateSyncKeyQuery, s.JID, id).Scan(&key.Data, &key.Timestamp, &key.Fingerprint)
+		key, err = convertAppStateSyncKeyRow(s.db.QueryRow(ctx, mssqlGetAppStateSyncKeyQuery, s.JID, id).Scan(&key.Data, &key.Timestamp, &key.Fingerprint))
 	} else {
-		err = s.db.QueryRow(ctx, sqliteGetAppStateSyncKeyQuery, s.JID, id).Scan(&key.Data, &key.Timestamp, &key.Fingerprint)
+		key, err = convertAppStateSyncKeyRow(s.db.QueryRow(ctx, sqliteGetAppStateSyncKeyQuery, s.JID, id).Scan(&key.Data, &key.Timestamp, &key.Fingerprint))
 	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
-	return &key, err
+	return key, err
 }
 
 func (s *SQLStore) GetLatestAppStateSyncKeyID(ctx context.Context) ([]byte, error) {
@@ -1520,33 +1502,41 @@ func (s *SQLStore) GetContact(ctx context.Context, user types.JID) (types.Contac
 	return *info, nil
 }
 
-func (s *SQLStore) GetAllContacts(ctx context.Context) (map[types.JID]types.ContactInfo, error) {
-	s.contactCacheLock.Lock()
-	defer s.contactCacheLock.Unlock()
-	rows, err := s.db.Query(ctx, getAllContactsQuery, s.JID)
+type contactTuple struct {
+	JID  types.JID
+	Info *types.ContactInfo
+}
+
+var convertContactRow = dbutil.ConvertRowFn[*contactTuple](func(rows dbutil.Scannable) (*contactTuple, error) {
+	var jid types.JID
+	var first, full, push, business, redactedPhone sql.NullString
+	err := rows.Scan(&jid, &first, &full, &push, &business, &redactedPhone)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error scanning row: %w", err)
 	}
-	output := make(map[types.JID]types.ContactInfo, len(s.contactCache))
-	for rows.Next() {
-		var jid types.JID
-		var first, full, push, business, redactedPhone sql.NullString
-		err = rows.Scan(&jid, &first, &full, &push, &business, &redactedPhone)
-		if err != nil {
-			return nil, fmt.Errorf("error scanning row: %w", err)
-		}
-		info := types.ContactInfo{
+	return &contactTuple{
+		JID: jid,
+		Info: &types.ContactInfo{
 			Found:         true,
 			FirstName:     first.String,
 			FullName:      full.String,
 			PushName:      push.String,
 			BusinessName:  business.String,
 			RedactedPhone: redactedPhone.String,
-		}
-		output[jid] = info
-		s.contactCache[jid] = &info
-	}
-	return output, nil
+		},
+	}, nil
+})
+
+func (s *SQLStore) GetAllContacts(ctx context.Context) (map[types.JID]types.ContactInfo, error) {
+	s.contactCacheLock.Lock()
+	defer s.contactCacheLock.Unlock()
+	output := make(map[types.JID]types.ContactInfo, len(s.contactCache))
+	err := convertContactRow.NewRowIter(s.db.Query(ctx, getAllContactsQuery, s.JID)).Iter(func(tuple *contactTuple) (bool, error) {
+		output[tuple.JID] = *tuple.Info
+		s.contactCache[tuple.JID] = tuple.Info
+		return true, nil
+	})
+	return output, err
 }
 
 const (
@@ -1740,22 +1730,22 @@ func (s *SQLStore) GetMessageSecret(ctx context.Context, chat, sender types.JID,
 
 const (
 	sqlitePutPrivacyTokens = `
-		INSERT INTO whatsmeow_privacy_tokens (our_jid, their_jid, token, timestamp)
-		VALUES (@p1, @p2, @p3, @p4)
-		ON CONFLICT (our_jid, their_jid) DO UPDATE SET token=EXCLUDED.token, timestamp=EXCLUDED.timestamp
+		INSERT INTO whatsmeow_privacy_tokens (our_jid, their_jid, token, timestamp, sender_timestamp)
+		VALUES (@p1, @p2, @p3, @p4, @p5)
+		ON CONFLICT (our_jid, their_jid) DO UPDATE SET token=EXCLUDED.token, timestamp=EXCLUDED.timestamp, sender_timestamp=COALESCE(EXCLUDED.sender_timestamp, whatsmeow_privacy_tokens.sender_timestamp)
 	`
 	mssqlPutPrivacyTokens = `
 		MERGE INTO whatsmeow_privacy_tokens AS target
-		USING (VALUES (@p1, @p2, @p3, @p4)) AS source (our_jid, their_jid, token, timestamp_info)
+		USING (VALUES (@p1, @p2, @p3, @p4, @p5)) AS source (our_jid, their_jid, token, timestamp_info, sender_timestamp)
 		ON (target.our_jid = source.our_jid AND target.their_jid = source.their_jid)
 		WHEN MATCHED THEN
-			UPDATE SET target.token = source.token, target.timestamp_info = source.timestamp_info
+			UPDATE SET target.token = source.token, target.timestamp_info = source.timestamp_info, target.sender_timestamp = COALESCE(source.sender_timestamp, target.sender_timestamp)
 		WHEN NOT MATCHED THEN
-			INSERT (our_jid, their_jid, token, timestamp_info)
-			VALUES (source.our_jid, source.their_jid, source.token, source.timestamp_info);
+			INSERT (our_jid, their_jid, token, timestamp_info, sender_timestamp)
+			VALUES (source.our_jid, source.their_jid, source.token, source.timestamp_info, source.sender_timestamp);
 	`
 	sqliteGetPrivacyToken = `
-		SELECT token, timestamp FROM whatsmeow_privacy_tokens WHERE our_jid=$1 AND (their_jid=$2 OR their_jid=(
+		SELECT token, timestamp, sender_timestamp FROM whatsmeow_privacy_tokens WHERE our_jid=$1 AND (their_jid=$2 OR their_jid=(
 			CASE
 				WHEN $2 LIKE '%@lid'
 					THEN (SELECT pn || '@s.whatsapp.net' FROM whatsmeow_lid_map WHERE lid=replace($2, '@lid', ''))
@@ -1767,7 +1757,7 @@ const (
 		ORDER BY timestamp DESC LIMIT 1
 	`
 	mssqlGetPrivacyToken = `
-		SELECT TOP 1 token, timestamp
+		SELECT TOP 1 token, timestamp_info, sender_timestamp
 		FROM whatsmeow_privacy_tokens
 		WHERE our_jid = @p1
 		  AND (their_jid = @p2 
@@ -1784,7 +1774,15 @@ const (
 		              ELSE @p2
 		          END
 		      )
-		ORDER BY timestamp DESC`
+		ORDER BY timestamp_info DESC`
+	sqliteDeleteExpiredPrivacyTokens = `
+		DELETE FROM whatsmeow_privacy_tokens
+		WHERE our_jid=$1 AND timestamp < $2
+	`
+	mssqlDeleteExpiredPrivacyTokens = `
+		DELETE FROM whatsmeow_privacy_tokens
+		WHERE our_jid=@p1 AND timestamp_info < @p2
+	`
 )
 
 func (s *SQLStore) PutPrivacyTokens(ctx context.Context, tokens ...store.PrivacyToken) error {
@@ -1795,17 +1793,22 @@ func (s *SQLStore) PutPrivacyTokens(ctx context.Context, tokens ...store.Privacy
 			their_jid VARCHAR(300),
 			token     VARBINARY(max)  NOT NULL,
 			timestamp_info BIGINT NOT NULL,
+			sender_timestamp BIGINT NULL
 		)`, dt.UnixMilli()))
 		if err != nil {
 			return fmt.Errorf("failed to create table: %w", err)
 		}
-		bulkImportStr := mssql.CopyIn(fmt.Sprintf("staging_privacytokens_%d", dt.UnixMilli()), mssql.BulkOptions{}, "our_jid", "their_jid", "token", "timestamp_info")
+		bulkImportStr := mssql.CopyIn(fmt.Sprintf("staging_privacytokens_%d", dt.UnixMilli()), mssql.BulkOptions{}, "our_jid", "their_jid", "token", "timestamp_info", "sender_timestamp")
 		stmt, err := s.db.PrepareContext(ctx, bulkImportStr)
 		if err != nil {
 			return fmt.Errorf("failed to prepare bulk: %w", err)
 		}
 		for _, token := range tokens {
-			_, err = stmt.Exec(s.JID, token.User.ToNonAD().String(), token.Token, token.Timestamp.Unix())
+			var senderTimestamp int* = nil
+			if !token.SenderTimestamp.IsZero() {
+				senderTimestamp = token.SenderTimestamp.Unix()
+			}
+			_, err = stmt.Exec(s.JID, token.User.ToNonAD().String(), token.Token, token.Timestamp.Unix(), senderTimestamp)
 			if err != nil {
 				return fmt.Errorf("failed to prepare insert: %w", err)
 			}
@@ -1818,10 +1821,10 @@ func (s *SQLStore) PutPrivacyTokens(ctx context.Context, tokens ...store.Privacy
 		USING staging_privacytokens_%d AS source 
 		ON target.our_jid = source.our_jid AND target.their_jid = source.their_jid
 		WHEN MATCHED THEN
-			UPDATE SET target.token = source.token, target.timestamp_info = source.timestamp_info
+			UPDATE SET target.token = source.token, target.timestamp_info = source.timestamp_info, target.sender_timestamp = COALESCE(source.sender_timestamp, target.sender_timestamp)
 		WHEN NOT MATCHED THEN
-			INSERT (our_jid, their_jid, token, timestamp_info)
-			VALUES (source.our_jid, source.their_jid, source.token, source.timestamp_info);`, dt.UnixMilli()))
+			INSERT (our_jid, their_jid, token, timestamp_info, sender_timestamp)
+			VALUES (source.our_jid, source.their_jid, source.token, source.timestamp_info, source.sender_timestamp);`, dt.UnixMilli()))
 		if err != nil {
 			return fmt.Errorf("failed to merge bulk: %w", err)
 		}
@@ -1840,11 +1843,12 @@ func (s *SQLStore) GetPrivacyToken(ctx context.Context, user types.JID) (*store.
 	var token store.PrivacyToken
 	token.User = user.ToNonAD()
 	var ts int64
+	var senderTS sql.NullInt64
 	var err error
 	if s.db.Dialect == dbutil.MSSQL {
-		err = s.db.QueryRow(ctx, mssqlGetPrivacyToken, s.JID, token.User).Scan(&token.Token, &ts)
+		err = s.db.QueryRow(ctx, mssqlGetPrivacyToken, s.JID, token.User).Scan(&token.Token, &ts, &senderTS)
 	} else {
-		err = s.db.QueryRow(ctx, sqliteGetPrivacyToken, s.JID, token.User).Scan(&token.Token, &ts)
+		err = s.db.QueryRow(ctx, sqliteGetPrivacyToken, s.JID, token.User).Scan(&token.Token, &ts, &senderTS)
 	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -1852,8 +1856,44 @@ func (s *SQLStore) GetPrivacyToken(ctx context.Context, user types.JID) (*store.
 		return nil, err
 	} else {
 		token.Timestamp = time.Unix(ts, 0)
+		if senderTS.Valid {
+			token.SenderTimestamp = time.Unix(senderTS.Int64, 0)
+		}
 		return &token, nil
 	}
+}
+
+func (s *SQLStore) PutNCTSalt(ctx context.Context, salt []byte) error {
+	_, err := s.db.Exec(ctx, putNCTSaltQuery, s.JID, salt)
+	return err
+}
+
+func (s *SQLStore) GetNCTSalt(ctx context.Context) ([]byte, error) {
+	var salt []byte
+	err := s.db.QueryRow(ctx, getNCTSaltQuery, s.JID).Scan(&salt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+	return salt, nil
+}
+
+func (s *SQLStore) DeleteNCTSalt(ctx context.Context) error {
+	_, err := s.db.Exec(ctx, deleteNCTSaltQuery, s.JID)
+	return err
+}
+
+func (s *SQLStore) DeleteExpiredPrivacyTokens(ctx context.Context, cutoff time.Time) (int64, error) {
+	res, err := s.db.Exec(ctx, deleteExpiredPrivacyTokens, s.JID, cutoff.Unix())
+	if err != nil {
+		return 0, err
+	}
+	deleted, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return deleted, nil
 }
 
 const (

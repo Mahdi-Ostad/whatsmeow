@@ -61,6 +61,7 @@ func New(ctx context.Context, dialect, address string, log waLog.Logger, dbLogge
 	container := NewWithDB(dbInstance, dialect, log, dbLogger)
 	err := container.Upgrade(ctx)
 	if err != nil {
+		_ = container.Close()
 		return nil, fmt.Errorf("failed to upgrade database: %w", err)
 	}
 	return container, nil
@@ -229,19 +230,10 @@ func (c *Container) scanDevice(row dbutil.Scannable) (*store.Device, error) {
 // GetAllDevices finds all the devices in the database.
 func (c *Container) GetAllDevices(ctx context.Context) ([]*store.Device, error) {
 	res, err := c.db.Query(ctx, getAllDevicesQuery)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query sessions: %w", err)
+	if err == nil {
+		defer res.Close()
 	}
-	defer res.Close()
-	sessions := make([]*store.Device, 0)
-	for res.Next() {
-		sess, scanErr := c.scanDevice(res)
-		if scanErr != nil {
-			return sessions, scanErr
-		}
-		sessions = append(sessions, sess)
-	}
-	return sessions, nil
+	return dbutil.NewRowIterWithError(res, c.scanDevice, err).AsList()
 }
 
 // GetFirstDevice is a convenience method for getting the first device in the store. If there are
