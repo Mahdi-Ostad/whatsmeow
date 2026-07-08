@@ -151,9 +151,9 @@ func ManageContacts(ctx context.Context, logger waLog.Logger) {
 		if value := recover(); value != nil {
 			err, ok := value.(error)
 			if ok {
-				logger.Fatalf(err.Error())
+				logger.Fatalf("could not manage contacts: %s", err.Error())
 			} else {
-				logger.Fatalf("Manage Contacts Recovered:" + err.Error())
+				logger.Fatalf("Manage Contacts Recovered: %s", err.Error())
 			}
 		}
 	}()
@@ -358,7 +358,7 @@ func ManageSenderKeys(ctx context.Context) {
 	for update := range senderkeysChannel {
 		err := manageSingleSenderKey(ctx, update)
 		if err != nil {
-			update.sqlStore.log.Errorf(err.Error())
+			update.sqlStore.log.Errorf("could not manage sender keys: %s", err.Error())
 		}
 	}
 }
@@ -509,7 +509,7 @@ func storeSessionsFromChan(ctx context.Context, update sessionBulkInsert) error 
 		bulkImportStr := mssql.CopyIn(fmt.Sprintf("staging_sessions_%d", dt.UnixMilli()), mssql.BulkOptions{}, "our_jid", "their_id", "session")
 		stmt, err := update.sqlStore.db.PrepareContext(ctx, bulkImportStr)
 		if err != nil {
-			update.sqlStore.log.Errorf("Could not Prepare Statement: " + err.Error())
+			update.sqlStore.log.Errorf("Could not Prepare Statement: %s", err.Error())
 			return err
 		}
 		for address, session := range update.sessions {
@@ -517,7 +517,7 @@ func storeSessionsFromChan(ctx context.Context, update sessionBulkInsert) error 
 		}
 		_, err = stmt.Exec()
 		if err != nil {
-			update.sqlStore.log.Errorf("Could not Store Sessions: " + err.Error())
+			update.sqlStore.log.Errorf("Could not Store Sessions: %s", err.Error())
 			return err
 		}
 		_, err = update.sqlStore.db.Exec(ctx, fmt.Sprintf(`MERGE INTO whatsmeow_sessions AS target 
@@ -529,12 +529,12 @@ func storeSessionsFromChan(ctx context.Context, update sessionBulkInsert) error 
 				INSERT (our_jid, their_id, session) 
 				VALUES (source.our_jid, source.their_id, source.session);`, dt.UnixMilli()))
 		if err != nil {
-			update.sqlStore.log.Errorf("failed to merge bulk: " + err.Error())
+			update.sqlStore.log.Errorf("failed to merge bulk: %s", err.Error())
 			return fmt.Errorf("failed to merge bulk: %w", err)
 		}
 		_, err = update.sqlStore.db.Exec(ctx, fmt.Sprintf("DROP TABLE staging_sessions_%d", dt.UnixMilli()))
 		if err != nil {
-			update.sqlStore.log.Errorf("failed to drop table: " + err.Error())
+			update.sqlStore.log.Errorf("failed to drop table: %s", err.Error())
 			return fmt.Errorf("failed to drop table: %w", err)
 		}
 		return nil
@@ -634,6 +634,9 @@ const (
 )
 
 func (s *SQLStore) PutIdentity(ctx context.Context, address string, key [32]byte) error {
+	if len(key[:]) != 32 {
+		return ErrInvalidLength
+	}
 	identityChannel <- identityUpdate{
 		sqlStore: s,
 		address:  address,
@@ -802,41 +805,62 @@ func (s *SQLStore) GetManySessions(ctx context.Context, addresses []string) (map
 		return nil, nil
 	}
 
-	var rows dbutil.Rows
-	var err error
-	if s.db.Dialect == dbutil.Postgres && PostgresArrayWrapper != nil {
-		rows, err = s.db.Query(ctx, getManySessionQueryPostgres, s.JID, PostgresArrayWrapper(addresses))
-	} else if s.db.Dialect == dbutil.MSSQL {
-		args := make([]any, len(addresses)+1)
-		placeholders := make([]string, len(addresses))
-		args[0] = s.JID
-		for i, addr := range addresses {
-			args[i+1] = addr
-			placeholders[i] = fmt.Sprintf("@p%d", i+2)
-		}
-		rows, err = s.db.Query(ctx, fmt.Sprintf(getManySessionQueryMSSQL, strings.Join(placeholders, ",")), args...)
-	} else {
-		args := make([]any, len(addresses)+1)
-		placeholders := make([]string, len(addresses))
-		args[0] = s.JID
-		for i, addr := range addresses {
-			args[i+1] = addr
-			placeholders[i] = fmt.Sprintf("$%d", i+2)
-		}
-		rows, err = s.db.Query(ctx, fmt.Sprintf(getManySessionQueryGeneric, strings.Join(placeholders, ",")), args...)
-	}
+	addressChunks := chunkSlice(addresses, 2000)
 	result := make(map[string][]byte, len(addresses))
-	for _, addr := range addresses {
-		result[addr] = nil
+	for _, chunk := range addressChunks {
+		var rows dbutil.Rows
+		var err error
+		if s.db.Dialect == dbutil.Postgres && PostgresArrayWrapper != nil {
+			rows, err = s.db.Query(ctx, getManySessionQueryPostgres, s.JID, PostgresArrayWrapper(chunk))
+		} else if s.db.Dialect == dbutil.MSSQL {
+			args := make([]any, len(chunk)+1)
+			placeholders := make([]string, len(chunk))
+			args[0] = s.JID
+			for i, addr := range chunk {
+				args[i+1] = addr
+				placeholders[i] = fmt.Sprintf("@p%d", i+2)
+			}
+			rows, err = s.db.Query(ctx, fmt.Sprintf(getManySessionQueryMSSQL, strings.Join(placeholders, ",")), args...)
+		} else {
+			args := make([]any, len(chunk)+1)
+			placeholders := make([]string, len(chunk))
+			args[0] = s.JID
+			for i, addr := range chunk {
+				args[i+1] = addr
+				placeholders[i] = fmt.Sprintf("$%d", i+2)
+			}
+			rows, err = s.db.Query(ctx, fmt.Sprintf(getManySessionQueryGeneric, strings.Join(placeholders, ",")), args...)
+		}
+
+		for _, addr := range chunk {
+			result[addr] = nil
+		}
+		err = sessionScanner.NewRowIter(rows, err).Iter(func(tuple addressSessionTuple) (bool, error) {
+			result[tuple.Address] = tuple.Session
+			return true, nil
+		})
+		if err != nil {
+			return nil, err
+		}
 	}
-	err = sessionScanner.NewRowIter(rows, err).Iter(func(tuple addressSessionTuple) (bool, error) {
-		result[tuple.Address] = tuple.Session
-		return true, nil
-	})
-	if err != nil {
-		return nil, err
-	}
+
 	return result, nil
+}
+
+func chunkSlice(slice []string, chunkSize int) [][]string {
+	var chunks [][]string
+
+	for i := 0; i < len(slice); i += chunkSize {
+		end := i + chunkSize
+
+		if end > len(slice) {
+			end = len(slice)
+		}
+
+		chunks = append(chunks, slice[i:end])
+	}
+
+	return chunks
 }
 
 func (s *SQLStore) PutManySessions(ctx context.Context, sessions map[string][]byte) error {
@@ -1698,9 +1722,6 @@ func (s *SQLStore) PutMessageSecrets(ctx context.Context, inserts []store.Messag
 		if err != nil {
 			return fmt.Errorf("failed to drop table: %w", err)
 		}
-		if err != nil {
-			return fmt.Errorf("failed to commit transaction: %w", err)
-		}
 		return nil
 	})
 }
@@ -1759,6 +1780,7 @@ const (
 	mssqlGetPrivacyToken = `
 		SELECT TOP 1 token, timestamp_info, sender_timestamp
 		FROM whatsmeow_privacy_tokens
+		WITH (NOLOCK)
 		WHERE our_jid = @p1
 		  AND (their_jid = @p2 
 		       OR their_jid = 
@@ -1853,9 +1875,6 @@ func (s *SQLStore) PutPrivacyTokens(ctx context.Context, tokens ...store.Privacy
 		_, err = s.db.Exec(ctx, fmt.Sprintf("DROP TABLE staging_privacytokens_%d", dt.UnixMilli()))
 		if err != nil {
 			return fmt.Errorf("failed to drop table: %w", err)
-		}
-		if err != nil {
-			return fmt.Errorf("failed to commit transaction: %w", err)
 		}
 		return nil
 	})
