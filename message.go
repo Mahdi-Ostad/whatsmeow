@@ -47,7 +47,7 @@ func (cli *Client) handleEncryptedMessage(ctx context.Context, node *waBinary.No
 		cli.sendAck(ctx, node, NackParsingError)
 		return
 	}
-	if info.Chat.User == cli.getOwnID().User {
+	if info.Chat.User == cli.getOwnID().User || info.Chat.User == cli.getOwnLID().User {
 		cli.ManualHandleEncryptedMessage(ctx, node)
 	} else if info.Chat.Server == types.DefaultUserServer {
 		err = cli.Store.PrekeysCache.PutMessageNode(ctx, info.Chat.User, nil, node)
