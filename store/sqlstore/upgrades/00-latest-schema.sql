@@ -4,16 +4,16 @@ CREATE TABLE whatsmeow_device (
 	lid VARCHAR(300),
 	facebook_uuid UNIQUEIDENTIFIER,
 	registration_id BIGINT NOT NULL CHECK ( registration_id >= 0 AND registration_id < 4294967296 ),
-	noise_key    VARBINARY(max) NOT NULL CHECK ( LEN(noise_key) = 32 ),
-	identity_key VARBINARY(max) NOT NULL CHECK ( LEN(identity_key) = 32 ),
-	signed_pre_key     VARBINARY(max)   NOT NULL CHECK ( LEN(signed_pre_key) = 32 ),
+	noise_key    VARBINARY(max) NOT NULL CHECK ( DATALENGTH(noise_key) = 32 ),
+	identity_key VARBINARY(max) NOT NULL CHECK ( DATALENGTH(identity_key) = 32 ),
+	signed_pre_key     VARBINARY(max)   NOT NULL CHECK ( DATALENGTH(signed_pre_key) = 32 ),
 	signed_pre_key_id  INTEGER NOT NULL CHECK ( signed_pre_key_id >= 0 AND signed_pre_key_id < 16777216 ),
-	signed_pre_key_sig VARBINARY(max)   NOT NULL CHECK ( LEN(signed_pre_key_sig) = 64 ),
+	signed_pre_key_sig VARBINARY(max)   NOT NULL CHECK ( DATALENGTH(signed_pre_key_sig) = 64 ),
 	adv_key         VARBINARY(max) NOT NULL,
 	adv_details     VARBINARY(max) NOT NULL,
-	adv_account_sig VARBINARY(max) NOT NULL CHECK ( LEN(adv_account_sig) = 64 ),
-	adv_account_sig_key  VARBINARY(max) NOT NULL CHECK ( LEN(adv_account_sig_key) = 32 ),
-	adv_device_sig  VARBINARY(max) NOT NULL CHECK ( LEN(adv_device_sig) = 64 ),
+	adv_account_sig VARBINARY(max) NOT NULL CHECK ( DATALENGTH(adv_account_sig) = 64 ),
+	adv_account_sig_key  VARBINARY(max) NOT NULL CHECK ( DATALENGTH(adv_account_sig_key) = 32 ),
+	adv_device_sig  VARBINARY(max) NOT NULL CHECK ( DATALENGTH(adv_device_sig) = 64 ),
 	platform      VARCHAR(300) NOT NULL DEFAULT '',
 	business_name NVARCHAR(300) NOT NULL DEFAULT '',
 	push_name     VARCHAR(300) NOT NULL DEFAULT '',
@@ -24,7 +24,7 @@ CREATE TABLE whatsmeow_device (
 CREATE TABLE whatsmeow_identity_keys (
 	our_jid  VARCHAR(300),
 	their_id VARCHAR(300),
-	identity_info VARBINARY(max) NOT NULL CHECK ( LEN(identity_info) = 32 ),
+	identity_info VARBINARY(max) NOT NULL CHECK ( DATALENGTH(identity_info) = 32 ),
 	PRIMARY KEY (our_jid, their_id),
 	FOREIGN KEY (our_jid) REFERENCES whatsmeow_device(jid) ON DELETE CASCADE ON UPDATE CASCADE
 );
@@ -32,7 +32,7 @@ CREATE TABLE whatsmeow_identity_keys (
 CREATE TABLE whatsmeow_pre_keys (
 	jid      VARCHAR(300),
 	key_id   INTEGER  CHECK ( key_id >= 0 AND key_id < 16777216 ),
-	key_info       VARBINARY(max)  NOT NULL CHECK (LEN(key_info) = 32 ),
+	key_info       VARBINARY(max)  NOT NULL CHECK (DATALENGTH(key_info) = 32 ),
 	uploaded BIT NOT NULL,
 	PRIMARY KEY (jid, key_id),
 	FOREIGN KEY (jid) REFERENCES whatsmeow_device(jid) ON DELETE CASCADE ON UPDATE CASCADE
@@ -69,7 +69,7 @@ CREATE TABLE whatsmeow_app_state_version (
 	jid     VARCHAR(300),
 	name    VARCHAR(300),
 	version_info BIGINT NOT NULL,
-	hash    VARBINARY(max)  NOT NULL CHECK ( LEN(hash) = 128 ),
+	hash    VARBINARY(max)  NOT NULL CHECK ( DATALENGTH(hash) = 128 ),
 	PRIMARY KEY (jid, name),
 	FOREIGN KEY (jid) REFERENCES whatsmeow_device(jid) ON DELETE CASCADE ON UPDATE CASCADE
 );
@@ -78,8 +78,8 @@ CREATE TABLE whatsmeow_app_state_mutation_macs (
 	jid        VARCHAR(300),
 	name       VARCHAR(300),
 	version_info   BIGINT,
-	index_mac VARBINARY(200) CHECK ( LEN(index_mac) = 32 ),
-	value_mac VARBINARY(max) NOT NULL CHECK ( LEN(value_mac) = 32 ),
+	index_mac VARBINARY(200) CHECK ( DATALENGTH(index_mac) = 32 ),
+	value_mac VARBINARY(max) NOT NULL CHECK ( DATALENGTH(value_mac) = 32 ),
 	PRIMARY KEY (jid, name, version_info, index_mac),
 	FOREIGN KEY (jid, name) REFERENCES whatsmeow_app_state_version(jid, name) ON DELETE CASCADE ON UPDATE CASCADE
 );
@@ -141,7 +141,7 @@ CREATE TABLE whatsmeow_lid_map (
 
 CREATE TABLE whatsmeow_event_buffer (
 	our_jid          VARCHAR(300)   NOT NULL,
-	ciphertext_hash  VARBINARY(300)  NOT NULL CHECK ( LEN(ciphertext_hash) = 32 ),
+	ciphertext_hash  VARBINARY(300)  NOT NULL CHECK ( DATALENGTH(ciphertext_hash) = 32 ),
 	plaintext        VARBINARY(max),
 	server_timestamp BIGINT NOT NULL,
 	insert_timestamp BIGINT NOT NULL,
