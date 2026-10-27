@@ -343,7 +343,8 @@ const (
 				platform=excluded.platform,
 				business_name=excluded.business_name,
 				push_name=excluded.push_name,
-				lid_migration_ts=excluded.lid_migration_ts
+				lid_migration_ts=excluded.lid_migration_ts,
+				companion_meta_nonce=excluded.companion_meta_nonce
 	`
 	mssqlInsertDeviceQuery = `
 		MERGE INTO whatsmeow_device AS target

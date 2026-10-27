@@ -50,9 +50,13 @@ func NewFrameSocket(log waLog.Logger, client *http.Client) *FrameSocket {
 		Header: WAConnHeader,
 		Frames: make(chan []byte),
 
-		URL:         URL,
-		HTTPHeaders: http.Header{"Origin": {Origin}},
-		HTTPClient:  client,
+		URL: URL,
+		HTTPHeaders: http.Header{
+			"Origin":        {Origin},
+			"Cache-Control": {"no-cache"},
+			"Pragma":        {"no-cache"},
+		},
+		HTTPClient: client,
 	}
 }
 
@@ -170,8 +174,8 @@ func (fs *FrameSocket) processData(msg []byte) {
 			if len(msg) >= FrameLengthSize {
 				length := (int(msg[0]) << 16) + (int(msg[1]) << 8) + int(msg[2])
 				fs.incomingLength = length
-				fs.receivedLength = len(msg)
 				msg = msg[FrameLengthSize:]
+				fs.receivedLength = len(msg)
 				if len(msg) >= length {
 					fs.incoming = msg[:length]
 					msg = msg[length:]

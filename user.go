@@ -157,20 +157,17 @@ func (cli *Client) GetContactQRLink(ctx context.Context, revoke bool) (string, e
 	return ag.String("code"), ag.Error()
 }
 
+const mutationUpdateTextStatus = "9152604461510864"
+
 // SetStatusMessage updates the current user's status text, which is shown in the "About" section in the user profile.
 //
 // This is different from the ephemeral status broadcast messages. Use SendMessage to types.StatusBroadcastJID to send
 // such messages.
-func (cli *Client) SetStatusMessage(ctx context.Context, msg string) error {
-	_, err := cli.sendIQ(ctx, infoQuery{
-		Namespace: "status",
-		Type:      iqSet,
-		To:        types.ServerJID,
-		Content: []waBinary.Node{{
-			Tag:     "status",
-			Content: msg,
-		}},
+func (cli *Client) SetStatusMessage(ctx context.Context, status types.SetStatusInput) error {
+	_, err := cli.sendMexIQ(ctx, mutationUpdateTextStatus, map[string]any{
+		"input": &status,
 	})
+	// TODO check output result?
 	return err
 }
 
@@ -182,21 +179,36 @@ func (cli *Client) IsOnWhatsApp(ctx context.Context, phones []string) ([]types.I
 		jids[i] = types.NewJID(phones[i], types.LegacyUserServer)
 	}
 	list, err := cli.usync(ctx, jids, "query", "interactive", []waBinary.Node{
+		{Tag: "contact", Attrs: waBinary.Attrs{"addressing_mode": "lid"}},
 		{Tag: "business", Content: []waBinary.Node{{Tag: "verified_name"}}},
-		{Tag: "contact"},
+		{Tag: "disappearing_mode"},
+		{Tag: "username"},
 	})
 	if err != nil {
 		return nil, err
 	}
 	output := make([]types.IsOnWhatsAppResponse, 0, len(jids))
+	lidEntries := make([]store.LIDMapping, 0, len(jids))
 	querySuffix := "@" + types.LegacyUserServer
 	for _, child := range list.GetChildren() {
-		jid, jidOK := child.Attrs["jid"].(types.JID)
-		if child.Tag != "user" || !jidOK {
+		ag := child.AttrGetter()
+		jid := ag.OptionalJIDOrEmpty("jid")
+		pnJID := ag.OptionalJIDOrEmpty("pn_jid")
+		if child.Tag != "user" || (jid.IsEmpty() && pnJID.IsEmpty()) {
 			continue
 		}
 		var info types.IsOnWhatsAppResponse
 		info.JID = jid
+		if jid.IsEmpty() {
+			info.JID = pnJID
+		}
+		info.PhoneNumber = pnJID
+		if info.JID.Server == types.HiddenUserServer && info.PhoneNumber.Server == types.DefaultUserServer {
+			lidEntries = append(lidEntries, store.LIDMapping{
+				LID: info.JID,
+				PN:  info.PhoneNumber,
+			})
+		}
 		info.VerifiedName, err = parseVerifiedName(child.GetChildByTag("business"))
 		if err != nil {
 			cli.Log.Warnf("Failed to parse %s's verified name details: %v", jid, err)
@@ -206,6 +218,12 @@ func (cli *Client) IsOnWhatsApp(ctx context.Context, phones []string) ([]types.I
 		contactQuery, _ := contactNode.Content.([]byte)
 		info.Query = strings.TrimSuffix(string(contactQuery), querySuffix)
 		output = append(output, info)
+	}
+	if len(lidEntries) > 0 {
+		err = cli.Store.LIDs.PutManyLIDMappings(ctx, lidEntries)
+		if err != nil {
+			return output, fmt.Errorf("failed to store LID mappings: %w", err)
+		}
 	}
 	return output, nil
 }
@@ -743,9 +761,16 @@ func parseVerifiedNameContent(verifiedNameNode waBinary.Node) (*types.VerifiedNa
 	if err != nil {
 		return nil, err
 	}
+	ag := verifiedNameNode.AttrGetter()
 	return &types.VerifiedName{
 		Certificate: &cert,
 		Details:     &certDetails,
+
+		VerifiedLevel: ag.String("verified_level"),
+		Version:       ag.Int("v"),
+		HostStorage:   ag.Int("host_storage"),
+		ActualActors:  ag.Int("actual_actors"),
+		PrivacyModeTS: ag.UnixTime("privacy_mode_ts"),
 	}, nil
 }
 
@@ -930,10 +955,12 @@ func (cli *Client) usync(ctx context.Context, jids []types.JID, mode, context st
 	}
 }
 
-func (cli *Client) parseBlocklist(node *waBinary.Node) *types.Blocklist {
+func (cli *Client) parseBlocklist(node *waBinary.Node) (*types.Blocklist, []store.LIDMapping) {
 	output := &types.Blocklist{
-		DHash: node.AttrGetter().String("dhash"),
+		DHash:          node.AttrGetter().String("dhash"),
+		AddressingMode: types.AddressingMode(node.AttrGetter().String("addressing_mode")),
 	}
+	var lidMappings []store.LIDMapping
 	for _, child := range node.GetChildren() {
 		ag := child.AttrGetter()
 		blockedJID := ag.JID("jid")
@@ -942,40 +969,110 @@ func (cli *Client) parseBlocklist(node *waBinary.Node) *types.Blocklist {
 			continue
 		}
 
-		output.JIDs = append(output.JIDs, blockedJID)
+		item := types.BlocklistItem{
+			LID:    blockedJID,
+			PN:     ag.OptionalJIDOrEmpty("pn_jid"),
+			Active: ag.OptionalBool("active"),
+		}
+		output.Items = append(output.Items, item)
+		if item.Active && item.LID.Server == types.HiddenUserServer && item.PN.Server == types.DefaultUserServer {
+			lidMappings = append(lidMappings, store.LIDMapping{PN: item.PN, LID: item.LID})
+		}
 	}
-	return output
+	return output, lidMappings
 }
 
 // GetBlocklist gets the list of users that this user has blocked.
-func (cli *Client) GetBlocklist(ctx context.Context) (*types.Blocklist, error) {
+//
+// If a dhash is provided, and it matches the server value, then no blocklist will be returned.
+func (cli *Client) GetBlocklist(ctx context.Context, dhash string) (*types.Blocklist, error) {
+	var content []waBinary.Node
+	if dhash != "" {
+		content = []waBinary.Node{{
+			Tag: "item",
+			Attrs: waBinary.Attrs{
+				"dhash": dhash,
+			},
+		}}
+	}
 	resp, err := cli.sendIQ(ctx, infoQuery{
 		Namespace: "blocklist",
 		Type:      iqGet,
 		To:        types.ServerJID,
+		Content:   content,
 	})
 	if err != nil {
 		return nil, err
 	}
 	list, ok := resp.GetOptionalChildByTag("list")
 	if !ok {
+		if dhash != "" {
+			return nil, nil
+		}
 		return nil, &ElementMissingError{Tag: "list", In: "response to blocklist query"}
 	}
-	return cli.parseBlocklist(&list), nil
+	blocklist, mappings := cli.parseBlocklist(&list)
+	if len(mappings) > 0 {
+		err = cli.Store.LIDs.PutManyLIDMappings(ctx, mappings)
+		if err != nil {
+			cli.Log.Errorf("Failed to store LID mappings from blocklist query: %v", err)
+		}
+	}
+	return blocklist, nil
 }
 
 // UpdateBlocklist updates the user's block list and returns the updated list.
-func (cli *Client) UpdateBlocklist(ctx context.Context, jid types.JID, action events.BlocklistChangeAction) (*types.Blocklist, error) {
+//
+// If a dhash is provided, and it matches the server value, then an updated blocklist will not be returned.
+func (cli *Client) UpdateBlocklist(ctx context.Context, jid types.JID, action events.BlocklistChangeAction, dhash string) (*types.Blocklist, error) {
+	var lidJID, pnJID types.JID
+
+	if jid.Server == types.DefaultUserServer {
+		pnJID = jid
+		lid, err := cli.Store.LIDs.GetLIDForPN(ctx, jid)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get LID for PN %s: %w", jid, err)
+		}
+		if lid.IsEmpty() {
+			info, err := cli.GetUserInfo(ctx, []types.JID{jid})
+			if err != nil {
+				return nil, fmt.Errorf("failed to get user info for %s to fill LID cache: %w", jid, err)
+			}
+			lid = info[jid].LID
+			if lid.IsEmpty() {
+				return nil, fmt.Errorf("%w: no LID found for %s from server", ErrRecipientNotOnWhatsApp, jid)
+			}
+		}
+		lidJID = lid
+	} else if jid.Server == types.HiddenUserServer {
+		lidJID = jid
+		if action == events.BlocklistChangeActionBlock {
+			pn, err := cli.Store.LIDs.GetPNForLID(ctx, jid)
+			if err != nil {
+				return nil, fmt.Errorf("failed to resolve PN for %s: %w", jid, err)
+			}
+			pnJID = pn
+		}
+	}
+
+	itemAttrs := waBinary.Attrs{
+		"jid":    lidJID,
+		"action": string(action),
+	}
+	if action == events.BlocklistChangeActionBlock && !pnJID.IsEmpty() {
+		itemAttrs["pn_jid"] = pnJID
+	}
+	if dhash != "" {
+		itemAttrs["dhash"] = dhash
+	}
+
 	resp, err := cli.sendIQ(ctx, infoQuery{
 		Namespace: "blocklist",
 		Type:      iqSet,
 		To:        types.ServerJID,
 		Content: []waBinary.Node{{
-			Tag: "item",
-			Attrs: waBinary.Attrs{
-				"jid":    jid,
-				"action": string(action),
-			},
+			Tag:   "item",
+			Attrs: itemAttrs,
 		}},
 	})
 	if err != nil {
@@ -985,5 +1082,9 @@ func (cli *Client) UpdateBlocklist(ctx context.Context, jid types.JID, action ev
 	if !ok {
 		return nil, &ElementMissingError{Tag: "list", In: "response to blocklist update"}
 	}
-	return cli.parseBlocklist(&list), err
+	if dhash != "" && list.AttrGetter().Bool("matched") {
+		return nil, nil
+	}
+	blocklist, _ := cli.parseBlocklist(&list)
+	return blocklist, err
 }
