@@ -1581,6 +1581,8 @@ const (
 	getChatSettingsQuery = `
 		SELECT muted_until, pinned, archived FROM whatsmeow_chat_settings WITH (NOLOCK) WHERE our_jid=@p1 AND chat_jid=@p2
 	`
+	sqliteGetWASARootSecretIDQuery = `SELECT wasa_root_secret_id FROM whatsmeow_chat_settings WHERE our_jid=$1 AND chat_jid=$2`
+	mssqlGetWASARootSecretIDQuery  = `SELECT wasa_root_secret_id FROM whatsmeow_chat_settings WITH (NOLOCK) WHERE our_jid=@p1 AND chat_jid=@p2`
 )
 
 func (s *SQLStore) PutMutedUntil(ctx context.Context, chat types.JID, mutedUntil time.Time) error {
@@ -1623,12 +1625,22 @@ func (s *SQLStore) PutArchived(ctx context.Context, chat types.JID, archived boo
 }
 
 func (s *SQLStore) PutWASARootSecretID(ctx context.Context, chat types.JID, id types.MessageID) error {
-	_, err := s.db.Exec(ctx, fmt.Sprintf(putChatSettingQuery, "wasa_root_secret_id"), s.JID, chat, id)
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	if s.db.Dialect == dbutil.MSSQL {
+		_, err := s.db.Exec(ctx, fmt.Sprintf(mssqlPutChatSettingQuery, "wasa_root_secret_id"), s.JID, chat, id)
+		return err
+	}
+	_, err := s.db.Exec(ctx, fmt.Sprintf(sqlitePutChatSettingQuery, "wasa_root_secret_id"), s.JID, chat, id)
 	return err
 }
 
 func (s *SQLStore) GetWASARootSecretID(ctx context.Context, chat types.JID) (id types.MessageID, err error) {
-	err = s.db.QueryRow(ctx, `SELECT wasa_root_secret_id FROM whatsmeow_chat_settings WHERE our_jid=$1 AND chat_jid=$2`, s.JID, chat).Scan(&id)
+	if s.db.Dialect == dbutil.MSSQL {
+		err = s.db.QueryRow(ctx, mssqlGetWASARootSecretIDQuery, s.JID, chat).Scan(&id)
+	} else {
+		err = s.db.QueryRow(ctx, sqliteGetWASARootSecretIDQuery, s.JID, chat).Scan(&id)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		err = nil
 	}
@@ -1718,6 +1730,9 @@ func (s *SQLStore) PutMessageSecrets(ctx context.Context, inserts []store.Messag
 			return fmt.Errorf("failed to prepare bulk: %w", err)
 		}
 		for _, insert := range inserts {
+			if insert.Chat.IsEmpty() || insert.Sender.IsEmpty() || insert.ID == "" || len(insert.Secret) == 0 {
+				continue
+			}
 			_, err = stmt.Exec(s.JID, insert.Chat.ToNonAD(), insert.Sender.ToNonAD(), insert.ID, insert.Secret)
 			if err != nil {
 				return fmt.Errorf("failed to prepare insert: %w", err)

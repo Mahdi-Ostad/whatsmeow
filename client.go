@@ -205,6 +205,12 @@ type Client struct {
 	websocketHTTP *http.Client
 	preLoginHTTP  *http.Client
 
+	// UserAgent sets a custom User-Agent header on the WebSocket connection.
+	// Only used when MessengerConfig is nil; for Messenger, set MessengerConfig.UserAgent instead.
+	UserAgent string
+	// WebSocketHeaders contains extra HTTP headers to include on the WebSocket upgrade request.
+	WebSocketHeaders http.Header
+
 	// This field changes the client to act like a Messenger client instead of a WhatsApp one.
 	//
 	// Note that you cannot use a Messenger account just by setting this field, you must use a

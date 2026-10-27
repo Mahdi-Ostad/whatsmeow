@@ -21,7 +21,8 @@ CREATE TABLE whatsmeow_device (
 
 	lid_migration_ts BIGINT NOT NULL DEFAULT 0,
 
-	companion_meta_nonce TEXT NOT NULL DEFAULT ''
+	companion_meta_nonce NVARCHAR(MAX) NOT NULL DEFAULT '',
+	locktime BIGINT NOT NULL DEFAULT 0
 );
 CREATE TABLE whatsmeow_identity_keys (
 	our_jid  VARCHAR(300),
@@ -99,11 +100,12 @@ CREATE TABLE whatsmeow_contacts (
 );
 
 CREATE TABLE whatsmeow_chat_settings (
-	our_jid       VARCHAR(300),
-	chat_jid      VARCHAR(300),
-	muted_until   BIGINT  NOT NULL DEFAULT 0,
-	pinned        BIT NOT NULL DEFAULT 0,
-	archived      BIT NOT NULL DEFAULT 1,
+	our_jid            VARCHAR(300),
+	chat_jid           VARCHAR(300),
+	muted_until        BIGINT       NOT NULL DEFAULT 0,
+	pinned             BIT          NOT NULL DEFAULT 0,
+	archived           BIT          NOT NULL DEFAULT 1,
+	wasa_root_secret_id NVARCHAR(MAX) NOT NULL DEFAULT '',
 	PRIMARY KEY (our_jid, chat_jid),
 	FOREIGN KEY (our_jid) REFERENCES whatsmeow_device(jid) ON DELETE CASCADE ON UPDATE CASCADE
 );
