@@ -55,6 +55,7 @@ type SQLStore struct {
 	contactCacheLock sync.Mutex
 
 	migratedPNSessionsCache *exsync.Set[string]
+	senderKeyCache          sync.Map
 }
 
 type contactUpdate struct {
@@ -354,6 +355,14 @@ func massInsertRedactedPhones(ctx context.Context, update contactRedactedPhoneUp
 	return nil
 }
 
+func isDeviceConstraintOrStaleErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	errMsg := err.Error()
+	return strings.Contains(errMsg, "FOREIGN KEY constraint") && strings.Contains(errMsg, "whatsmeow_device")
+}
+
 func ManageSenderKeys(ctx context.Context) {
 	for update := range senderkeysChannel {
 		err := manageSingleSenderKey(ctx, update)
@@ -366,11 +375,15 @@ func ManageSenderKeys(ctx context.Context) {
 func manageSingleSenderKey(ctx context.Context, senderkeyUpdate senderkeyUpdate) error {
 	senderkeyUpdate.sqlStore.mutex.Lock()
 	defer senderkeyUpdate.sqlStore.mutex.Unlock()
+	var err error
 	if senderkeyUpdate.sqlStore.db.Dialect == dbutil.MSSQL {
-		_, err := senderkeyUpdate.sqlStore.db.Exec(ctx, mssqlPutSenderKeyQuery, senderkeyUpdate.sqlStore.JID, senderkeyUpdate.group, senderkeyUpdate.user, senderkeyUpdate.session)
-		return err
+		_, err = senderkeyUpdate.sqlStore.db.Exec(ctx, mssqlPutSenderKeyQuery, senderkeyUpdate.sqlStore.JID, senderkeyUpdate.group, senderkeyUpdate.user, senderkeyUpdate.session)
+	} else {
+		_, err = senderkeyUpdate.sqlStore.db.Exec(ctx, sqlitePutSenderKeyQuery, senderkeyUpdate.sqlStore.JID, senderkeyUpdate.group, senderkeyUpdate.user, senderkeyUpdate.session)
 	}
-	_, err := senderkeyUpdate.sqlStore.db.Exec(ctx, sqlitePutSenderKeyQuery, senderkeyUpdate.sqlStore.JID, senderkeyUpdate.group, senderkeyUpdate.user, senderkeyUpdate.session)
+	if isDeviceConstraintOrStaleErr(err) {
+		return nil
+	}
 	return err
 }
 
@@ -408,6 +421,9 @@ func putSingleSession(ctx context.Context, update sessionPut) (err error) {
 		_, err = update.sqlStore.db.Exec(ctx, mssqlPutSessionQuery, update.sqlStore.JID, update.address, update.session)
 	} else {
 		_, err = update.sqlStore.db.Exec(ctx, sqlitePutSessionQuery, update.sqlStore.JID, update.address, update.session)
+	}
+	if isDeviceConstraintOrStaleErr(err) {
+		return nil
 	}
 	return err
 }
@@ -560,10 +576,13 @@ func putSingleIdentity(ctx context.Context, update identityUpdate) (err error) {
 	update.sqlStore.mutex.Lock()
 	defer update.sqlStore.mutex.Unlock()
 	if update.sqlStore.db.Dialect == dbutil.MSSQL {
-		_, err := update.sqlStore.db.Exec(ctx, mssqlPutIdentityQuery, update.sqlStore.JID, update.address, update.key[:])
-		return err
+		_, err = update.sqlStore.db.Exec(ctx, mssqlPutIdentityQuery, update.sqlStore.JID, update.address, update.key[:])
+	} else {
+		_, err = update.sqlStore.db.Exec(ctx, sqlitePutIdentityQuery, update.sqlStore.JID, update.address, update.key[:])
 	}
-	_, err = update.sqlStore.db.Exec(ctx, sqlitePutIdentityQuery, update.sqlStore.JID, update.address, update.key[:])
+	if isDeviceConstraintOrStaleErr(err) {
+		return nil
+	}
 	return err
 }
 
@@ -894,6 +913,7 @@ func (s *SQLStore) deleteAllSessions(ctx context.Context, phone string) error {
 }
 
 func (s *SQLStore) deleteAllSenderKeys(ctx context.Context, phone string) error {
+	s.senderKeyCache.Clear()
 	if s.db.Dialect == dbutil.MSSQL {
 		_, err := s.db.Exec(ctx, mssqlDeleteAllSenderKeysQuery, s.JID, phone+":%")
 		return err
@@ -1081,6 +1101,7 @@ const (
 )
 
 func (s *SQLStore) PutSenderKey(ctx context.Context, group, user string, session []byte) error {
+	s.senderKeyCache.Store(group+"/"+user, session)
 	senderkeysChannel <- senderkeyUpdate{
 		group:    group,
 		user:     user,
@@ -1091,9 +1112,14 @@ func (s *SQLStore) PutSenderKey(ctx context.Context, group, user string, session
 }
 
 func (s *SQLStore) GetSenderKey(ctx context.Context, group, user string) (key []byte, err error) {
+	if val, ok := s.senderKeyCache.Load(group + "/" + user); ok {
+		return val.([]byte), nil
+	}
 	err = s.db.QueryRow(ctx, getSenderKeyQuery, s.JID, group, user).Scan(&key)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = nil
+	} else if err == nil && len(key) > 0 {
+		s.senderKeyCache.Store(group+"/"+user, key)
 	}
 	return
 }

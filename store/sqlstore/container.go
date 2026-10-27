@@ -56,6 +56,8 @@ func New(ctx context.Context, dialect, address string, log waLog.Logger, dbLogge
 		}
 		db.SetMaxOpenConns(maxConnection)
 		db.SetMaxIdleConns(maxConnection)
+		db.SetConnMaxLifetime(10 * time.Minute)
+		db.SetConnMaxIdleTime(3 * time.Minute)
 		dbInstance = db
 	}
 	container := NewWithDB(dbInstance, dialect, log, dbLogger)
